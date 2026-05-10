@@ -1,0 +1,11 @@
+{
+  "name": "slackkb",
+  "private": true,
+  "scripts": {
+    "build": "npm run build --prefix api && npm run build --prefix web",
+    "start": "concurrently -k -n api,web -c blue,green \"npm run start --prefix api\" \"npm run preview --prefix web\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
