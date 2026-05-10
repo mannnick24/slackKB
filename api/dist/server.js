@@ -2,13 +2,14 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import { config } from "./config.js";
+import { logger } from "./logger.js";
 import sensible from "@fastify/sensible";
 import { chatRoutes } from "./routes/chat.routes.js";
 import { configRoutes } from "./routes/config.routes.js";
 import { documentsRoutes } from "./routes/documents.routes.js";
 import { statusRoutes } from "./routes/status.routes.js";
 export async function buildServer() {
-    const app = Fastify({ logger: true });
+    const app = Fastify({ loggerInstance: logger });
     await app.register(cors, {
         origin: config.corsOrigin ?? true,
         credentials: true,

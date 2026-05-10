@@ -4,6 +4,7 @@ import { EmbeddingService } from "./embedding.service.js";
 import { CryptoService } from "./crypto.service.js";
 import { CommonToolFactory } from "../plugins/CommonToolFactory.js";
 import { createRagPlugin } from "../plugins/RagPlugin.js";
+import { logger } from "../logger.js";
 /*
  * Worker to handle LLM interactions for an agent.
  * Uses org-level llmProvider (and apiKey) only.
@@ -32,7 +33,7 @@ export class LlmAgentWorker {
         let prompt = (systemPropmptFromConfig + " \n" +
             defaultAgentPrompt + " \n");
         if (options?.lastUserMessage) {
-            console.log("Getting RAG context");
+            logger.debug("llm: fetching RAG context");
             const ragContext = await this.embeddingService.getRagContextForPrompt(config.defaultOrg, options.lastUserMessage);
             if (ragContext) {
                 prompt = prompt + "\n\n" + ragContext;
@@ -59,7 +60,7 @@ export class LlmAgentWorker {
                 ],
                 temperature,
             };
-            console.log("Creating LLM completion ");
+            logger.debug({ model }, "llm: chat completion");
             let response = await openapi.chat.completions.create(opts);
             const toolCallsResponses = [];
             while (response.choices[0].finish_reason === "tool_calls") {
@@ -74,7 +75,7 @@ export class LlmAgentWorker {
                     messages.push(...toolCallsResponse.result);
                 }
                 if (toolCallsResponse.error) {
-                    console.error("Tool call error:", toolCallsResponse.error);
+                    logger.error({ err: toolCallsResponse.error }, "llm: tool call error");
                     break;
                 }
                 toolCallsResponses.push(toolCallsResponse);
@@ -96,7 +97,7 @@ export class LlmAgentWorker {
             return { reply, finaliser };
         }
         catch (error) {
-            console.error("LLM completion error:", error);
+            logger.error({ err: error }, "llm: completion error");
             const message = error instanceof Error ? error.message : String(error);
             return { reply: "", error: message, finaliser: async () => { } };
         }
@@ -130,7 +131,7 @@ export class LlmAgentWorker {
                 if (tools?.length) {
                     streamParams.tools = tools;
                 }
-                console.log("Creating LLM stream for:");
+                logger.debug({ model }, "llm: stream completion");
                 const stream = openapi.chat.completions.stream(streamParams);
                 if (onTextDelta) {
                     stream.on("content", (delta) => {
@@ -152,7 +153,7 @@ export class LlmAgentWorker {
                         messages.push(...toolCallsResponse.result);
                     }
                     if (toolCallsResponse?.error) {
-                        console.error("Tool call error:", toolCallsResponse.error);
+                        logger.error({ err: toolCallsResponse.error }, "llm: tool call error");
                         break;
                     }
                     if (toolCallsResponse) {
@@ -171,7 +172,7 @@ export class LlmAgentWorker {
             return { reply, finaliser };
         }
         catch (error) {
-            console.error("LLM stream completion error:", error);
+            logger.error({ err: error }, "llm: stream completion error");
             const message = error instanceof Error ? error.message : String(error);
             return { reply: "", error: message, finaliser: async () => { } };
         }

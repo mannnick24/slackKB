@@ -38,11 +38,21 @@ export interface EmbeddingConfigResolved {
   host?: string;
 }
 
+/** Pino log levels; `silent` disables logging. */
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "silent";
+
 export interface AppConfig {
   nodeEnv: string;
   port: number;
 
   defaultOrg: string;
+
+  /** Pino logging (LOG_LEVEL, LOG_PRETTY). */
+  logging: {
+    level: LogLevel;
+    /** Human-readable logs via pino-pretty (default on in non-production when LOG_PRETTY unset). */
+    pretty: boolean;
+  };
 
   /** Postgres + pgvector for RAG chunks */
   pg: {
@@ -112,10 +122,32 @@ function parseEmbeddingProviderTypeFromEnv(): EmbeddingProviderType {
 const resolvedLlmProviderType = parseLlmProviderTypeFromEnv();
 const resolvedEmbeddingProviderType = parseEmbeddingProviderTypeFromEnv();
 
+const nodeEnv = process.env.NODE_ENV ?? "development";
+
+function parseLogLevel(raw: string | undefined): LogLevel {
+  const allowed: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal", "silent"];
+  const v = (raw ?? "").trim().toLowerCase() as LogLevel;
+  if (allowed.includes(v)) return v;
+  return nodeEnv === "production" ? "info" : "debug";
+}
+
+function parseLogPretty(): boolean {
+  const e = process.env.LOG_PRETTY?.trim().toLowerCase();
+  if (e === "true" || e === "1") return true;
+  if (e === "false" || e === "0") return false;
+  return nodeEnv !== "production";
+}
+
 export const config: AppConfig = {
   defaultOrg: "default_org",
-  nodeEnv: process.env.NODE_ENV ?? "development",
+  nodeEnv,
   port: Number(process.env.PORT ?? "3001"),
+
+  logging: {
+    // "trace", "debug", "info", "warn", "error", "fatal", "silent"
+    level: parseLogLevel(process.env.LOG_LEVEL),
+    pretty: parseLogPretty(),
+  },
 
   pg: {
     connectionString: process.env.PG_CONNECTION_STRING ?? "postgres://admin:supersecurepassword@localhost:5432/aic-db",

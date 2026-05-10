@@ -4,6 +4,7 @@ import { EmbeddingService } from "../services/embedding.service.js";
 import { ingestFile, ingestFileStreamedFromPath, ingestSlackArchiveStreamedFromPath, } from "../services/ingest.service.js";
 import { getSupportedExtensions } from "../services/documentParser.service.js";
 import { config } from "../config.js";
+import { logger } from "../logger.js";
 function parseIngestMode(raw) {
     const v = String(raw ?? "")
         .trim()
@@ -32,9 +33,10 @@ export async function documentsRoutes(app) {
             return reply.code(400).send({ error: "No file uploaded. Use multipart with field `file`." });
         }
         const filename = filePart.filename ?? "unknown";
-        console.log("Uploading file: ", filename, " ingestMode: ", ingestMode);
+        logger.info({ filename, ingestMode, orgId: defaultOrg }, "documents: upload");
         const isZip = filename.toLowerCase().endsWith(".zip");
         if (ingestMode === "slack_archive" && !isZip) {
+            logger.debug({ filename }, "documents: rejected slack_archive without zip");
             return reply.code(400).send({
                 error: "Slack archive ingest requires a .zip file (Slack export).",
             });
@@ -51,8 +53,23 @@ export async function documentsRoutes(app) {
                 ws.on("finish", () => resolve());
                 ws.on("error", (err) => reject(err));
             });
+            let tmpBytes = 0;
+            try {
+                const st = await fs.promises.stat(tmpPath);
+                tmpBytes = st.size;
+            }
+            catch {
+                /* ignore */
+            }
+            logger.debug({
+                tmpPath,
+                tmpBytes,
+                ingestMode,
+                filename,
+            }, "documents: zip spooled to temp file");
             try {
                 if (ingestMode === "slack_archive") {
+                    logger.debug({ filename, tmpBytes, orgId: defaultOrg }, "documents: starting Slack archive ingest");
                     result = await ingestSlackArchiveStreamedFromPath(defaultOrg, tmpPath, filename, embeddingService);
                 }
                 else {
@@ -61,6 +78,7 @@ export async function documentsRoutes(app) {
             }
             finally {
                 await fs.promises.unlink(tmpPath).catch(() => { });
+                logger.debug({ tmpPath, ingestMode }, "documents: temp zip removed");
             }
         }
         else {
@@ -68,6 +86,7 @@ export async function documentsRoutes(app) {
             result = await ingestFile(defaultOrg, buffer, filename, embeddingService);
         }
         if (result.errors.length > 0 && result.chunksStored === 0) {
+            logger.debug({ ingestMode, filename, errors: result.errors }, "documents: ingest failed (no vectors stored)");
             return reply.code(400).send({
                 error: "Ingest failed",
                 details: result.errors,
@@ -77,6 +96,15 @@ export async function documentsRoutes(app) {
         if (result.skippedDuplicates > 0) {
             warnings.push(`Skipped ${result.skippedDuplicates} duplicate vector(s) (same ingest key already stored for this org).`);
         }
+        logger.debug({
+            ingestMode,
+            filename,
+            filesProcessed: result.filesProcessed,
+            chunksStored: result.chunksStored,
+            skippedDuplicates: result.skippedDuplicates,
+            warningCount: warnings.length,
+            errorCount: result.errors.length,
+        }, "documents: ingest complete");
         return reply.send({
             filesProcessed: result.filesProcessed,
             chunksStored: result.chunksStored,

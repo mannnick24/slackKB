@@ -6,6 +6,7 @@ import {
     ChatCompletionTool,
 } from "openai/resources";
 import { AgentChatCompletionToolInvocation } from "./ChatCompletionToolInvocation.js";
+import { logger } from "../logger.js";
 
 export interface ToolCallsHandler {
     tools: ChatCompletionTool[];
@@ -122,7 +123,7 @@ export class CommonToolFactory {
             try {
                 await toolInvocation.finalise();   
             } catch (e: any) {
-                console.error(`Finalisation error: ${e?.message ?? String(e)}`);
+                logger.error({ err: e }, "tools: finalisation error");
             }
         }});
         finaliser = async () => {

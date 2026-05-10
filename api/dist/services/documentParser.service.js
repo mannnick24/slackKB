@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import unzipper from "unzipper";
+import { logger } from "../logger.js";
 const TEXT_EXT = new Set([".txt", ".text", ".md", ".markdown"]);
 function isTextExt(ext) {
     return TEXT_EXT.has(ext.toLowerCase());
@@ -51,16 +52,25 @@ async function parseZipFromPath(filePath, _filename) {
     return out;
 }
 /** Parse .zip and invoke a handler per ParsedDocument, without holding all in memory at once. */
-async function parseZipFromPathStreaming(filePath, _filename, handle) {
-    console.log("Parsing zip from path streaming: ", filePath);
+async function parseZipFromPathStreaming(filePath, archiveFilename, handle) {
     const stat = await fs.promises.stat(filePath);
     const MAX_ZIP_SIZE_BYTES = 200 * 1024 * 1024;
     if (stat.size > MAX_ZIP_SIZE_BYTES) {
         throw new Error("Zip file too large to ingest");
     }
     const directory = await unzipper.Open.file(filePath);
+    const fileEntries = directory.files.filter((e) => e.type !== "Directory");
+    const textCandidates = fileEntries.filter((e) => isTextExt(path.extname(e.path) || ""));
+    logger.debug({
+        filePath,
+        archiveFilename,
+        zipSizeBytes: stat.size,
+        zipEntryCount: fileEntries.length,
+        textEntryCount: textCandidates.length,
+    }, "parser: text zip streaming start");
     const MAX_ENTRIES = 1000;
     let processed = 0;
+    let skippedNonText = 0;
     for (const entry of directory.files) {
         if (entry.type === "Directory")
             continue;
@@ -69,8 +79,10 @@ async function parseZipFromPathStreaming(filePath, _filename, handle) {
         }
         const name = entry.path;
         const ext = path.extname(name) || "";
-        if (!isTextExt(ext))
+        if (!isTextExt(ext)) {
+            skippedNonText += 1;
             continue;
+        }
         const stream = entry.stream();
         const chunks = [];
         await new Promise((resolve, reject) => {
@@ -79,9 +91,11 @@ async function parseZipFromPathStreaming(filePath, _filename, handle) {
             stream.on("error", reject);
         });
         const text = Buffer.concat(chunks).toString("utf-8");
+        logger.debug({ entryPath: name, charLength: text.length, docIndex: processed }, "parser: text zip entry");
         await handle({ name, text });
         processed += 1;
     }
+    logger.debug({ archiveFilename, documentsEmitted: processed, skippedNonText }, "parser: text zip streaming done");
 }
 const parsersByExt = {
     ".txt": parseText,

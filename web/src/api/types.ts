@@ -50,6 +50,10 @@ export type PublicAppConfig = {
   defaultAgentPrompt?: string;
   llmProviderType: string;
   embeddingProviderType: string;
+  logging: {
+    level: string;
+    pretty: boolean;
+  };
 };
 
 export type ChatCompletionMessage = {

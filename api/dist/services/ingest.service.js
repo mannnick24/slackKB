@@ -7,13 +7,14 @@ import { parseSlackArchiveZipStreaming } from "./slackArchiveParser.service.js";
 import { chunkText } from "./chunker.service.js";
 import * as vectorRepo from "../db/vectorRepo.js";
 import { config } from "../config.js";
+import { logger } from "../logger.js";
 import { ingestKeyForTextChunk } from "./ingestKey.util.js";
 /**
  * Ingest one or more documents (from parsed list). Chunks are created,
  * embedded, and inserted for the given org.
  */
 export async function ingestDocuments(orgId, documents, embeddingService, sourceName, options) {
-    console.log("Ingesting documents: ", documents.length);
+    logger.debug({ documentCount: documents.length }, "ingest: documents batch");
     const errors = [];
     if (documents.length === 0) {
         return { filesProcessed: 0, chunksStored: 0, skippedDuplicates: 0, errors };
@@ -38,7 +39,7 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
     // - insert those chunks
     const singleChunk = options?.singleChunkPerDocument === true;
     for (const doc of documents) {
-        console.log("Ingesting document: ", doc.name);
+        logger.debug({ documentName: doc.name }, "ingest: document");
         const docChunks = singleChunk
             ? (() => {
                 const t = doc.text.trim();
@@ -58,7 +59,7 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
         }
         catch (e) {
             errors.push(e?.message ?? String(e));
-            console.error("Error embedding document: ", e);
+            logger.error({ err: e, documentName: doc.name }, "ingest: embed failed");
             // Skip this document but continue with others.
             continue;
         }
@@ -100,7 +101,7 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
 export async function ingestFile(orgId, buffer, filename, embeddingService) {
     let documents;
     try {
-        console.log("Parsing document from buffer for filename: ", filename);
+        logger.debug({ filename }, "ingest: parse buffer");
         documents = await parseDocument(buffer, filename);
     }
     catch (e) {
@@ -111,7 +112,7 @@ export async function ingestFile(orgId, buffer, filename, embeddingService) {
             errors: [e?.message ?? String(e)],
         };
     }
-    console.log("Ingesting documents from filename: ", filename, " documents: ", documents.length);
+    logger.info({ filename, documentCount: documents.length }, "ingest: from buffer");
     return ingestDocuments(orgId, documents, embeddingService, filename);
 }
 /**
@@ -120,7 +121,7 @@ export async function ingestFile(orgId, buffer, filename, embeddingService) {
 export async function ingestFileFromPath(orgId, filePath, filename, embeddingService) {
     let documents;
     try {
-        console.log("Parsing document from path for filename: ", filename);
+        logger.debug({ filename }, "ingest: parse path");
         documents = await parseDocumentFromPath(filePath, filename);
     }
     catch (e) {
@@ -138,7 +139,7 @@ export async function ingestFileFromPath(orgId, filePath, filename, embeddingSer
  * each document's chunks immediately. Useful for large zip archives.
  */
 export async function ingestFileStreamedFromPath(orgId, filePath, filename, embeddingService) {
-    console.log("Ingesting file streamed from path: ", filename);
+    logger.info({ filename }, "ingest: streamed zip from path");
     const errors = [];
     let filesProcessed = 0;
     let chunksStored = 0;
@@ -156,14 +157,14 @@ export async function ingestFileStreamedFromPath(orgId, filePath, filename, embe
         };
     }
     const handleDoc = async (doc) => {
-        console.log(`Handling document: ${doc.name}`);
+        logger.debug({ documentName: doc.name }, "ingest: zip entry");
         filesProcessed += 1;
         const docChunks = chunkText(doc.text).map((c) => ({
             sourceName: doc.name,
             text: c.text,
             index: c.index,
         }));
-        console.log(`Document chunks: ${docChunks.length}`);
+        logger.debug({ documentName: doc.name, chunkCount: docChunks.length }, "ingest: chunks");
         if (docChunks.length === 0)
             return;
         const texts = docChunks.map((c) => c.text);
@@ -215,7 +216,7 @@ export async function ingestFileStreamedFromPath(orgId, filePath, filename, embe
  * Embeddings are requested in batches (see config.ingestEmbedBatchSize).
  */
 export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filename, embeddingService) {
-    console.log("Ingesting Slack archive from path: ", filename);
+    logger.info({ filename, orgId }, "ingest: Slack archive from path");
     const errors = [];
     let filesProcessed = 0;
     let chunksStored = 0;
@@ -233,6 +234,13 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
         };
     }
     const batchSize = config.ingestEmbedBatchSize;
+    logger.debug({
+        orgId,
+        filename,
+        batchSize,
+        embeddingModel: embeddingConfig.model,
+        embeddingDimensions: embeddingConfig.dimensions,
+    }, "ingest: slack pipeline config");
     const pending = [];
     const insertRows = async (rows, embeddings) => {
         const toInsert = rows
@@ -250,11 +258,17 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
         const ins = await vectorRepo.insertChunks(orgId, toInsert);
         chunksStored += ins.inserted;
         skippedDuplicates += ins.skippedDuplicates;
+        logger.debug({
+            rowCount: rows.length,
+            inserted: ins.inserted,
+            skippedDuplicates: ins.skippedDuplicates,
+        }, "ingest: slack vectors persisted");
     };
     /** Embed a batch; on failure fall back to single-message calls so partial progress still lands. */
     const flushBatch = async (batch) => {
         if (batch.length === 0)
             return;
+        logger.debug({ batchSize: batch.length, pendingAfter: pending.length }, "ingest: slack embed batch start");
         try {
             const embeddings = await embeddingService.embed(orgId, batch.map((b) => b.text));
             if (embeddings.length !== batch.length) {
@@ -263,6 +277,7 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
             await insertRows(batch, embeddings);
         }
         catch (batchErr) {
+            logger.debug({ batchSize: batch.length, err: batchErr?.message ?? String(batchErr) }, "ingest: slack batch embed failed, falling back to single-message embeds");
             errors.push(`Batch embed (${batch.length}): ${batchErr?.message ?? String(batchErr)}`);
             for (const row of batch) {
                 try {
@@ -270,6 +285,7 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
                     await insertRows([row], embeddings);
                 }
                 catch (e) {
+                    logger.debug({ ingestKey: row.ingestKey, err: e?.message ?? String(e) }, "ingest: slack single-message embed failed");
                     errors.push(e?.message ?? String(e));
                 }
             }
@@ -278,8 +294,10 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
     const handleDoc = async (doc) => {
         filesProcessed += 1;
         const trimmed = doc.text.trim();
-        if (!trimmed)
+        if (!trimmed) {
+            logger.debug({ sourceName: doc.name, ingestKey: doc.ingestKey }, "ingest: slack skip empty message body");
             return;
+        }
         pending.push({
             text: trimmed,
             sourceName: doc.name,
@@ -294,11 +312,21 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
         await parseSlackArchiveZipStreaming(filePath, filename, handleDoc);
     }
     catch (e) {
+        logger.debug({ err: e?.message ?? String(e) }, "ingest: slack parse/zip failed");
         errors.push(e?.message ?? String(e));
     }
     if (pending.length > 0) {
+        logger.debug({ remainder: pending.length }, "ingest: slack flushing final partial batch");
         await flushBatch(pending.splice(0, pending.length));
     }
+    logger.debug({
+        orgId,
+        filename,
+        messagesSeen: filesProcessed,
+        chunksStored,
+        skippedDuplicates,
+        errorCount: errors.length,
+    }, "ingest: slack archive finished");
     return {
         filesProcessed,
         chunksStored,

@@ -5,6 +5,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import unzipper from "unzipper";
+import { logger } from "../logger.js";
+function detectSlackJsonShape(raw) {
+    const t = raw.trim();
+    if (!t)
+        return "empty";
+    if (t.startsWith("["))
+        return "array";
+    if (t.startsWith("{"))
+        return "object";
+    return "ndjson";
+}
 /** Known Slack export root JSON files that are not per-channel message logs. */
 const SKIP_JSON_BASENAMES = new Set([
     "users.json",
@@ -51,7 +62,7 @@ function formatMessageDoc(obj, entryPath) {
         : `slack:loc:${normPath}#${ts}`;
     return { name, text: body, ingestKey };
 }
-function extractMessagesFromJsonContent(raw, entryPath) {
+function extractMessagesFromJsonContent(raw, entryPath, stats) {
     const trimmed = raw.trim();
     const out = [];
     if (!trimmed)
@@ -60,11 +71,16 @@ function extractMessagesFromJsonContent(raw, entryPath) {
         if (!obj || typeof obj !== "object")
             return;
         const o = obj;
-        if (o.type !== "message")
+        if (o.type !== "message") {
+            if (stats)
+                stats.nonMessageObjects += 1;
             return;
+        }
         const doc = formatMessageDoc(o, entryPath);
         if (doc)
             out.push(doc);
+        else if (stats)
+            stats.emptyTextSkipped += 1;
     };
     if (trimmed.startsWith("[")) {
         try {
@@ -114,19 +130,40 @@ function shouldParseSlackJsonEntry(entryPath) {
 /**
  * Walk a Slack-style zip on disk and invoke handler once per message document.
  */
-export async function parseSlackArchiveZipStreaming(filePath, _archiveFilename, handle) {
+export async function parseSlackArchiveZipStreaming(filePath, archiveFilename, handle) {
     const stat = await fs.promises.stat(filePath);
     if (stat.size > MAX_ZIP_SIZE_BYTES) {
         throw new Error("Zip file too large to ingest");
     }
     const directory = await unzipper.Open.file(filePath);
+    const allEntries = directory.files.filter((e) => e.type !== "Directory");
+    const candidateJson = allEntries.filter((e) => shouldParseSlackJsonEntry(e.path));
+    logger.debug({
+        archiveFilename,
+        filePath,
+        zipSizeBytes: stat.size,
+        zipEntryCount: allEntries.length,
+        slackJsonCandidateCount: candidateJson.length,
+    }, "slack parser: opened archive");
     let jsonFilesProcessed = 0;
+    let messagesEmitted = 0;
+    let entriesSkippedNotJson = 0;
+    let entriesSkippedMetadata = 0;
     for (const entry of directory.files) {
         if (entry.type === "Directory")
             continue;
         const name = entry.path;
-        if (!shouldParseSlackJsonEntry(name))
+        const lower = name.toLowerCase();
+        if (!lower.endsWith(".json")) {
+            entriesSkippedNotJson += 1;
             continue;
+        }
+        const base = path.basename(lower);
+        if (SKIP_JSON_BASENAMES.has(base)) {
+            entriesSkippedMetadata += 1;
+            logger.debug({ entryPath: name, reason: "metadata_json" }, "slack parser: skip file");
+            continue;
+        }
         if (jsonFilesProcessed >= MAX_JSON_ENTRIES) {
             throw new Error("Slack archive contains too many JSON files to ingest");
         }
@@ -138,10 +175,28 @@ export async function parseSlackArchiveZipStreaming(filePath, _archiveFilename, 
             stream.on("error", reject);
         });
         const raw = Buffer.concat(chunks).toString("utf-8");
-        const docs = extractMessagesFromJsonContent(raw, name);
+        const shape = detectSlackJsonShape(raw);
+        const lineStats = { nonMessageObjects: 0, emptyTextSkipped: 0 };
+        const docs = extractMessagesFromJsonContent(raw, name, lineStats);
+        logger.debug({
+            entryPath: name,
+            jsonShape: shape,
+            rawChars: raw.length,
+            messagesInFile: docs.length,
+            nonMessageObjects: lineStats.nonMessageObjects,
+            emptyTextSkipped: lineStats.emptyTextSkipped,
+        }, "slack parser: parsed JSON log file");
         for (const doc of docs) {
             await handle(doc);
+            messagesEmitted += 1;
         }
         jsonFilesProcessed += 1;
     }
+    logger.debug({
+        archiveFilename,
+        jsonFilesProcessed,
+        messagesEmitted,
+        entriesSkippedNotJson,
+        entriesSkippedMetadata,
+    }, "slack parser: archive walk complete");
 }

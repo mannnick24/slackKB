@@ -48,10 +48,31 @@ function parseEmbeddingProviderTypeFromEnv() {
 }
 const resolvedLlmProviderType = parseLlmProviderTypeFromEnv();
 const resolvedEmbeddingProviderType = parseEmbeddingProviderTypeFromEnv();
+const nodeEnv = process.env.NODE_ENV ?? "development";
+function parseLogLevel(raw) {
+    const allowed = ["trace", "debug", "info", "warn", "error", "fatal", "silent"];
+    const v = (raw ?? "").trim().toLowerCase();
+    if (allowed.includes(v))
+        return v;
+    return nodeEnv === "production" ? "info" : "debug";
+}
+function parseLogPretty() {
+    const e = process.env.LOG_PRETTY?.trim().toLowerCase();
+    if (e === "true" || e === "1")
+        return true;
+    if (e === "false" || e === "0")
+        return false;
+    return nodeEnv !== "production";
+}
 export const config = {
     defaultOrg: "default_org",
-    nodeEnv: process.env.NODE_ENV ?? "development",
+    nodeEnv,
     port: Number(process.env.PORT ?? "3001"),
+    logging: {
+        // "trace", "debug", "info", "warn", "error", "fatal", "silent"
+        level: parseLogLevel(process.env.LOG_LEVEL),
+        pretty: parseLogPretty(),
+    },
     pg: {
         connectionString: process.env.PG_CONNECTION_STRING ?? "postgres://admin:supersecurepassword@localhost:5432/aic-db",
     },

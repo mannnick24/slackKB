@@ -10,6 +10,7 @@ import {
 } from "../services/ingest.service.js";
 import { getSupportedExtensions } from "../services/documentParser.service.js";
 import { config } from "../config.js";
+import { logger } from "../logger.js";
 
 function parseIngestMode(raw: unknown): DocumentIngestMode {
     const v = String(raw ?? "")
@@ -42,10 +43,11 @@ export async function documentsRoutes(app: FastifyInstance) {
         }
 
         const filename = filePart.filename ?? "unknown";
-        console.log("Uploading file: ", filename, " ingestMode: ", ingestMode);
+        logger.info({ filename, ingestMode, orgId: defaultOrg }, "documents: upload");
         const isZip = filename.toLowerCase().endsWith(".zip");
 
         if (ingestMode === "slack_archive" && !isZip) {
+            logger.debug({ filename }, "documents: rejected slack_archive without zip");
             return reply.code(400).send({
                 error: "Slack archive ingest requires a .zip file (Slack export).",
             });
@@ -66,14 +68,36 @@ export async function documentsRoutes(app: FastifyInstance) {
                 ws.on("error", (err: unknown) => reject(err));
             });
 
+            let tmpBytes = 0;
+            try {
+                const st = await fs.promises.stat(tmpPath);
+                tmpBytes = st.size;
+            } catch {
+                /* ignore */
+            }
+            logger.debug(
+                {
+                    tmpPath,
+                    tmpBytes,
+                    ingestMode,
+                    filename,
+                },
+                "documents: zip spooled to temp file"
+            );
+
             try {
                 if (ingestMode === "slack_archive") {
+                    logger.debug(
+                        { filename, tmpBytes, orgId: defaultOrg },
+                        "documents: starting Slack archive ingest"
+                    );
                     result = await ingestSlackArchiveStreamedFromPath(defaultOrg, tmpPath, filename, embeddingService);
                 } else {
                     result = await ingestFileStreamedFromPath(defaultOrg, tmpPath, filename, embeddingService);
                 }
             } finally {
                 await fs.promises.unlink(tmpPath).catch(() => {});
+                logger.debug({ tmpPath, ingestMode }, "documents: temp zip removed");
             }
         } else {
             const buffer = await filePart.toBuffer();
@@ -81,6 +105,10 @@ export async function documentsRoutes(app: FastifyInstance) {
         }
 
         if (result.errors.length > 0 && result.chunksStored === 0) {
+            logger.debug(
+                { ingestMode, filename, errors: result.errors },
+                "documents: ingest failed (no vectors stored)"
+            );
             return reply.code(400).send({
                 error: "Ingest failed",
                 details: result.errors,
@@ -92,6 +120,18 @@ export async function documentsRoutes(app: FastifyInstance) {
                 `Skipped ${result.skippedDuplicates} duplicate vector(s) (same ingest key already stored for this org).`
             );
         }
+        logger.debug(
+            {
+                ingestMode,
+                filename,
+                filesProcessed: result.filesProcessed,
+                chunksStored: result.chunksStored,
+                skippedDuplicates: result.skippedDuplicates,
+                warningCount: warnings.length,
+                errorCount: result.errors.length,
+            },
+            "documents: ingest complete"
+        );
         return reply.send({
             filesProcessed: result.filesProcessed,
             chunksStored: result.chunksStored,

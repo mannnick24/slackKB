@@ -1,4 +1,5 @@
 import { AgentChatCompletionToolInvocation } from "./ChatCompletionToolInvocation.js";
+import { logger } from "../logger.js";
 function toOpenAiTool(def) {
     return { type: "function", function: def.function };
 }
@@ -78,7 +79,7 @@ export class CommonToolFactory {
                     await toolInvocation.finalise();
                 }
                 catch (e) {
-                    console.error(`Finalisation error: ${e?.message ?? String(e)}`);
+                    logger.error({ err: e }, "tools: finalisation error");
                 }
             };
         });

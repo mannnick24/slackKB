@@ -1,0 +1,38 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "API",
+      "cwd": "${workspaceFolder}/api",
+      "program": "${workspaceFolder}/api/dist/main.js",
+      "envFile": "${workspaceFolder}/api/.env",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "API (rebuild & run)",
+      "cwd": "${workspaceFolder}/api",
+      "program": "${workspaceFolder}/api/dist/main.js",
+      "envFile": "${workspaceFolder}/api/.env",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"],
+      "preLaunchTask": "api: build"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "API (tsx, no build)",
+      "cwd": "${workspaceFolder}/api",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--import", "tsx"],
+      "args": ["${workspaceFolder}/api/src/main.ts"],
+      "envFile": "${workspaceFolder}/api/.env",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}

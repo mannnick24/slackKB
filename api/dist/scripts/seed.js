@@ -1,5 +1,6 @@
 import pg from "pg";
 import { config } from "../config.js";
+import { logger } from "../logger.js";
 function env(name, fallback) {
     const v = process.env[name] ?? fallback;
     if (!v)
@@ -61,10 +62,10 @@ async function ensurePgVectorInit() {
       ON rag_chunks (org_id, ingest_key)
       WHERE ingest_key IS NOT NULL
     `);
-        console.log("✅ pgvector extension and rag_chunks table initialized (multi-dimension ready)");
+        logger.info("seed: pgvector and rag_chunks initialized");
     }
     catch (err) {
-        console.warn("⚠️ pgvector init skipped:", err?.message ?? err);
+        logger.warn({ err }, "seed: pgvector init skipped");
     }
     finally {
         await client.end().catch(() => { });
@@ -74,6 +75,6 @@ async function main() {
     await ensurePgVectorInit();
 }
 main().catch((err) => {
-    console.error("❌ Seed failed:", err);
+    logger.error({ err }, "seed: failed");
     process.exit(1);
 });
