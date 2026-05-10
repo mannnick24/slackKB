@@ -6,6 +6,7 @@
 import OpenAI from "openai";
 import { CryptoService } from "./crypto.service.js";
 import * as vectorRepo from "../db/vectorRepo.js";
+import { config } from "../config.js";
 
 const DEFAULT_MODEL = "text-embedding-3-small";
 const DEFAULT_DIMENSIONS = 768;
@@ -88,6 +89,15 @@ function normalizeDefaultEmbedUrl(host: string): string {
   }
 }
 
+/** Low-level fetch failures (ECONNREFUSED, DNS, TLS) surface as `fetch failed`; include URL and errno. */
+function embeddingFetchFailed(url: string, err: unknown): Error {
+  const e = err as NodeJS.ErrnoException & { cause?: unknown };
+  const base = e?.message ?? String(err);
+  const code = e?.code ? ` ${e.code}` : "";
+  const cause = e?.cause != null ? ` cause=${String(e.cause)}` : "";
+  return new Error(`Embedding HTTP request failed (${url}):${code} ${base}${cause}`);
+}
+
 export interface EmbeddingConfigResolved {
   /** Logical provider type used to select the client implementation. */
   type: EmbeddingProviderType;
@@ -112,91 +122,7 @@ export class EmbeddingService {
    * otherwise fallback to OPENAI_API_KEY env and default model.
    */
   async getConfig(orgId: string): Promise<EmbeddingConfigResolved> {
-    // TODO from config
-    const enc: any = {provider: "default", model: ""};
-
-    if (enc) {
-      const provider = enc.provider.toLowerCase();
-      if (provider === "openai") {
-        const apiKey = enc.apiKeyEnc
-          ? this.cryptoService.openJson<string>(enc.apiKeyEnc)
-          : process.env.OPENAI_API_KEY;
-        if (!apiKey) {
-          throw new Error("OpenAI embedding config requires an API key");
-        }
-        return {
-          type: "OPENAI",
-          apiKey,
-          model: enc.model || DEFAULT_MODEL,
-          dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-          host: enc.host,
-        };
-      }
-      if (provider === "ollama") {
-        return {
-          type: "OLLAMA",
-          model: enc.model || DEFAULT_MODEL,
-          dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-          host: enc.host || process.env.OLLAMA_EMBEDDING_HOST || "http://localhost:11434/api/embed",
-        };
-      }
-      if (provider === "default") {
-        return {
-          type: "DEFAULT",
-          model: enc.model || "nomic-embed-text-v1.5",
-          dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-          host:
-            enc.host ||
-            process.env.DEFAULT_EMBEDDING_HOST ||
-            "http://localhost:9012/embed",
-        };
-      }
-      if (provider === "other") {
-        const apiKey = enc.apiKeyEnc
-          ? this.cryptoService.openJson<string>(enc.apiKeyEnc)
-          : process.env.OPENAI_API_KEY;
-        if (!apiKey) {
-          throw new Error(
-            "OTHER embedding provider requires an API key (org or OPENAI_API_KEY)"
-          );
-        }
-        return {
-          type: "OTHER",
-          apiKey,
-          model: enc.model || DEFAULT_MODEL,
-          dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-          host: enc.host,
-        };
-      }
-      // Unknown provider: fall back to OpenAI semantics if possible.
-      const apiKey =
-        enc.apiKeyEnc !== undefined
-          ? this.cryptoService.openJson<string>(enc.apiKeyEnc)
-          : process.env.OPENAI_API_KEY;
-      if (!apiKey) {
-        throw new Error(
-          `Unsupported embedding provider "${enc.provider}" and no OPENAI_API_KEY fallback is configured`
-        );
-      }
-      return {
-        type: "OPENAI",
-        apiKey,
-        model: enc.model || DEFAULT_MODEL,
-        dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-        host: enc.host,
-      };
-    }
-    const fallbackKey = process.env.OPENAI_API_KEY;
-    if (!fallbackKey) {
-      throw new Error("No embedding config for org and OPENAI_API_KEY not set");
-    }
-    return {
-      type: "OPENAI",
-      apiKey: fallbackKey,
-      model: DEFAULT_MODEL,
-      dimensions: DEFAULT_DIMENSIONS,
-      host: undefined,
-    };
+    return config.embeddingConfig;
   }
 
   /**
@@ -226,14 +152,19 @@ export class EmbeddingService {
       const rawHost =
         cfg.host || process.env.OLLAMA_EMBEDDING_HOST || "http://localhost:11434/api/embed";
       const url = normalizeOllamaEmbedUrl(rawHost);
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: cfg.model,
-          input: texts.length === 1 ? texts[0] : texts,
-        }),
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: cfg.model,
+            input: texts.length === 1 ? texts[0] : texts,
+          }),
+        });
+      } catch (err) {
+        throw embeddingFetchFailed(url, err);
+      }
       const rawText = await resp.text();
       if (!resp.ok) {
         throw new Error(
@@ -256,11 +187,16 @@ export class EmbeddingService {
         process.env.DEFAULT_EMBEDDING_HOST ||
         "http://localhost:9012/embed";
       const url = normalizeDefaultEmbedUrl(rawHost);
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ texts }),
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ texts }),
+        });
+      } catch (err) {
+        throw embeddingFetchFailed(url, err);
+      }
       const rawText = await resp.text();
       if (!resp.ok) {
         throw new Error(

@@ -1,3 +1,8 @@
+import { createWriteStream } from "node:fs";
+import { stat, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { getChunkCountByOrg, deleteChunksByOrg } from "../db/vectorRepo.js";
 import { CryptoService } from "../services/crypto.service.js";
 import { EmbeddingService } from "../services/embedding.service.js";
@@ -20,21 +25,51 @@ export async function documentsRoutes(app) {
     const embeddingService = new EmbeddingService(cryptoService);
     app.post("/documents/upload", async (req, reply) => {
         let ingestMode = "text";
-        let filePart;
+        /** Multipart file streams must be consumed inside the parts loop or busboy blocks further parts. */
+        let filename = "unknown";
+        let zipTmpPath;
+        let fileBuffer;
+        let partIndex = 0;
         for await (const part of req.parts()) {
+            partIndex += 1;
+            logger.debug({ partIndex, partType: part.type, fieldname: part.fieldname }, "documents: multipart part");
             if (part.type === "field" && part.fieldname === "ingestMode") {
                 ingestMode = parseIngestMode(part.value);
             }
             else if (part.type === "file" && part.fieldname === "file") {
-                filePart = part;
+                filename = part.filename ?? "unknown";
+                const isZip = filename.toLowerCase().endsWith(".zip");
+                if (isZip) {
+                    zipTmpPath = join(tmpdir(), `upload-${Date.now()}-${Math.random().toString(36).slice(2)}.zip`);
+                    await pipeline(part.file, createWriteStream(zipTmpPath));
+                    try {
+                        const st = await stat(zipTmpPath);
+                        logger.debug({
+                            tmpPath: zipTmpPath,
+                            tmpBytes: st.size,
+                            ingestMode,
+                            filename,
+                        }, "documents: zip spooled to temp file");
+                    }
+                    catch {
+                        /* ignore stat failure */
+                    }
+                }
+                else {
+                    fileBuffer = await part.toBuffer();
+                }
+            }
+            else if (part.type === "file") {
+                await part.toBuffer();
+                logger.debug({ fieldname: part.fieldname }, "documents: discarded unexpected file field");
             }
         }
-        if (!filePart) {
+        const hasFile = zipTmpPath !== undefined || fileBuffer !== undefined;
+        if (!hasFile) {
             return reply.code(400).send({ error: "No file uploaded. Use multipart with field `file`." });
         }
-        const filename = filePart.filename ?? "unknown";
+        const isZip = zipTmpPath !== undefined;
         logger.info({ filename, ingestMode, orgId: defaultOrg }, "documents: upload");
-        const isZip = filename.toLowerCase().endsWith(".zip");
         if (ingestMode === "slack_archive" && !isZip) {
             logger.debug({ filename }, "documents: rejected slack_archive without zip");
             return reply.code(400).send({
@@ -42,48 +77,26 @@ export async function documentsRoutes(app) {
             });
         }
         let result;
-        if (isZip) {
-            const { tmpdir } = await import("node:os");
-            const { join } = await import("node:path");
-            const fs = await import("node:fs");
-            const tmpPath = join(tmpdir(), `upload-${Date.now()}-${Math.random().toString(36).slice(2)}.zip`);
-            await new Promise((resolve, reject) => {
-                const ws = fs.createWriteStream(tmpPath);
-                filePart.file.pipe(ws);
-                ws.on("finish", () => resolve());
-                ws.on("error", (err) => reject(err));
-            });
-            let tmpBytes = 0;
-            try {
-                const st = await fs.promises.stat(tmpPath);
-                tmpBytes = st.size;
-            }
-            catch {
-                /* ignore */
-            }
-            logger.debug({
-                tmpPath,
-                tmpBytes,
-                ingestMode,
-                filename,
-            }, "documents: zip spooled to temp file");
+        if (isZip && zipTmpPath) {
             try {
                 if (ingestMode === "slack_archive") {
-                    logger.debug({ filename, tmpBytes, orgId: defaultOrg }, "documents: starting Slack archive ingest");
-                    result = await ingestSlackArchiveStreamedFromPath(defaultOrg, tmpPath, filename, embeddingService);
+                    logger.debug({ filename, orgId: defaultOrg }, "documents: starting Slack archive ingest");
+                    result = await ingestSlackArchiveStreamedFromPath(defaultOrg, zipTmpPath, filename, embeddingService);
                 }
                 else {
-                    result = await ingestFileStreamedFromPath(defaultOrg, tmpPath, filename, embeddingService);
+                    result = await ingestFileStreamedFromPath(defaultOrg, zipTmpPath, filename, embeddingService);
                 }
             }
             finally {
-                await fs.promises.unlink(tmpPath).catch(() => { });
-                logger.debug({ tmpPath, ingestMode }, "documents: temp zip removed");
+                await unlink(zipTmpPath).catch(() => { });
+                logger.debug({ tmpPath: zipTmpPath, ingestMode }, "documents: temp zip removed");
             }
         }
+        else if (fileBuffer) {
+            result = await ingestFile(defaultOrg, fileBuffer, filename, embeddingService);
+        }
         else {
-            const buffer = await filePart.toBuffer();
-            result = await ingestFile(defaultOrg, buffer, filename, embeddingService);
+            return reply.code(400).send({ error: "No file uploaded. Use multipart with field `file`." });
         }
         if (result.errors.length > 0 && result.chunksStored === 0) {
             logger.debug({ ingestMode, filename, errors: result.errors }, "documents: ingest failed (no vectors stored)");

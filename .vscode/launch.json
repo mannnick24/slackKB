@@ -14,6 +14,22 @@
     {
       "type": "node",
       "request": "launch",
+      "name": "api ts",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+          "tsx",
+          "--env-file=${workspaceFolder}/api/.env",
+          "${workspaceFolder}/api/src/main.ts"
+      ],
+      "outputCapture": "std",
+      "skipFiles": ["<node_internals>/**"],
+      "envFile": "${workspaceFolder}/api/.env",
+      "cwd": "${workspaceFolder}/api",
+      "outFiles": ["${workspaceFolder}/api/src/**/*.ts"]
+  },
+    {
+      "type": "node",
+      "request": "launch",
       "name": "API (rebuild & run)",
       "cwd": "${workspaceFolder}/api",
       "program": "${workspaceFolder}/api/dist/main.js",

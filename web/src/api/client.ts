@@ -14,10 +14,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const body = init.body;
+  const jsonHeaders =
+    typeof body === "string" ? { "Content-Type": "application/json" } : {};
+
   const res = await fetch(path, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...jsonHeaders,
       ...(init.headers ?? {}),
     },
   });

@@ -77,6 +77,14 @@ function normalizeDefaultEmbedUrl(host) {
         return trimmed;
     }
 }
+/** Low-level fetch failures (ECONNREFUSED, DNS, TLS) surface as `fetch failed`; include URL and errno. */
+function embeddingFetchFailed(url, err) {
+    const e = err;
+    const base = e?.message ?? String(err);
+    const code = e?.code ? ` ${e.code}` : "";
+    const cause = e?.cause != null ? ` cause=${String(e.cause)}` : "";
+    return new Error(`Embedding HTTP request failed (${url}):${code} ${base}${cause}`);
+}
 export class EmbeddingService {
     cryptoService;
     constructor(cryptoService) {
@@ -191,14 +199,20 @@ export class EmbeddingService {
         if (cfg.type === "OLLAMA") {
             const rawHost = cfg.host || process.env.OLLAMA_EMBEDDING_HOST || "http://localhost:11434/api/embed";
             const url = normalizeOllamaEmbedUrl(rawHost);
-            const resp = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    model: cfg.model,
-                    input: texts.length === 1 ? texts[0] : texts,
-                }),
-            });
+            let resp;
+            try {
+                resp = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        model: cfg.model,
+                        input: texts.length === 1 ? texts[0] : texts,
+                    }),
+                });
+            }
+            catch (err) {
+                throw embeddingFetchFailed(url, err);
+            }
             const rawText = await resp.text();
             if (!resp.ok) {
                 throw new Error(`Ollama embedding request failed: ${resp.status} ${resp.statusText} ${rawText || "(empty body)"}`);
@@ -218,11 +232,17 @@ export class EmbeddingService {
                 process.env.DEFAULT_EMBEDDING_HOST ||
                 "http://localhost:9012/embed";
             const url = normalizeDefaultEmbedUrl(rawHost);
-            const resp = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ texts }),
-            });
+            let resp;
+            try {
+                resp = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ texts }),
+                });
+            }
+            catch (err) {
+                throw embeddingFetchFailed(url, err);
+            }
             const rawText = await resp.text();
             if (!resp.ok) {
                 throw new Error(`DEFAULT embedding request failed: ${resp.status} ${resp.statusText} ${rawText || "(empty body)"}`);
