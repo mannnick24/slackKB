@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    /* Language & emit */
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "noEmit": true,
+
+    /* Module system */
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": false,
+    "verbatimModuleSyntax": true,
+
+    /* Strictness */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "useUnknownInCatchVariables": true,
+
+    /* Interop & tooling */
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* Paths (optional, usually not needed with workspaces) */
+    "baseUrl": "."
+  },
+  "include": ["src", "../api/src/services/pageSummary.service..ts"],
+  "references": []
+}

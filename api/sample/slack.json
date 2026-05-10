@@ -1,0 +1,54 @@
+{
+    "user": "U04M2QFRBT9",
+    "type": "message",
+    "ts": "1777966712.076939",
+    "client_msg_id": "fa16b2e9-dd8f-44bb-b521-8478091d9cae",
+    "text": "<!here> i have some small pull request:\nJust a Button Layout:\n<https:\/\/bitbucket.org\/gammatelecom\/cc-web\/pull-requests\/779>\nWallboards counting now with Monday as weekstart:\n<https:\/\/bitbucket.org\/gammatelecom\/cc-logging-service\/pull-requests\/133>",
+    "team": "TBP8CEFNY",
+    "user_team": "TBP8CEFNY",
+    "source_team": "TBP8CEFNY",
+    "user_profile": {
+        "avatar_hash": "gc296922e82a",
+        "image_72": "https:\/\/secure.gravatar.com\/avatar\/c296922e82ae49fa941e2db478d705bd.jpg?s=72&d=https%3A%2F%2Fa.slack-edge.com%2Fdf10d%2Fimg%2Favatars%2Fava_0006-72.png",
+        "first_name": "Erik",
+        "real_name": "Erik",
+        "display_name": "Erik",
+        "team": "TBP8CEFNY",
+        "name": "erik.bochnia",
+        "is_restricted": false,
+        "is_ultra_restricted": false
+    },
+    "blocks": [
+        {
+            "type": "rich_text",
+            "block_id": "z2Dm0",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [
+                        {
+                            "type": "broadcast",
+                            "range": "here"
+                        },
+                        {
+                            "type": "text",
+                            "text": " i have some small pull request:\nJust a Button Layout:\n"
+                        },
+                        {
+                            "type": "link",
+                            "url": "https:\/\/bitbucket.org\/gammatelecom\/cc-web\/pull-requests\/779"
+                        },
+                        {
+                            "type": "text",
+                            "text": "\nWallboards counting now with Monday as weekstart:\n"
+                        },
+                        {
+                            "type": "link",
+                            "url": "https:\/\/bitbucket.org\/gammatelecom\/cc-logging-service\/pull-requests\/133"
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}
