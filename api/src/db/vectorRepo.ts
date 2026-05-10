@@ -15,6 +15,31 @@ function getPool(): pg.Pool {
   return pool;
 }
 
+/** Lightweight connectivity check (matches docker-compose `skb-postgres` / `PG_CONNECTION_STRING`). */
+export async function pingPostgres(): Promise<{
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+}> {
+  const start = Date.now();
+  try {
+    const p = getPool();
+    const client = await p.connect();
+    try {
+      await client.query("SELECT 1");
+      return { ok: true, latencyMs: Date.now() - start };
+    } finally {
+      client.release();
+    }
+  } catch (e: any) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      error: e?.message ?? String(e),
+    };
+  }
+}
+
 export interface RagChunkRow {
   id: string;
   org_id: string;

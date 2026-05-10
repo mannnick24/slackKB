@@ -10,6 +10,22 @@ export type UploadDocumentResponse = {
 export type DocumentIngestMode = "text" | "slack_archive";
 
 /** Mirrors `/api/v1/config` (secrets redacted server-side). */
+export type ComponentHealth = {
+  id: string;
+  displayName: string;
+  ok: boolean;
+  latencyMs?: number;
+  endpoint?: string;
+  detail?: string;
+  meta?: Record<string, string>;
+};
+
+export type SystemStatusResponse = {
+  vectorStore: ComponentHealth;
+  embedding: ComponentHealth;
+  llm: ComponentHealth;
+};
+
 export type PublicAppConfig = {
   nodeEnv: string;
   port: number;

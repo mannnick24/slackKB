@@ -1,3 +1,6 @@
+# Local defaults aligned with api/src/config.ts when env vars are unset:
+#   PG_CONNECTION_STRING=postgres://admin:supersecurepassword@localhost:5432/aic-db
+#   EMBEDDING_HOST=http://localhost:9012/embed   (maps skb-nomic-embed 8000 -> host 9012)
 services:
   skb-postgres:
     image: pgvector/pgvector:pg16   # PostgreSQL 16 with pgvector preinstalled
@@ -19,27 +22,28 @@ services:
       # Optional: run SQL scripts at startup (migrations, CREATE EXTENSION, etc.)
       - ./init:/docker-entrypoint-initdb.d
 
-  skb-nomic-embed:
-    build: ./packages/nomic-embed
-    image: nomic-embed:latest
-    container_name: skb-nomic-embed
-    # Make sure the app listens on 0.0.0.0:8000 in the container
-    command: >
-      sh -c 'python -c "import sys; print(sys.version)" &&
-             uvicorn server:app --host 0.0.0.0 --port 8000'
-    environment:
-      # Optional, but helps avoid tzdata/apt prompts if you build inside
-      - PYTHONUNBUFFERED=1
-      - PIP_NO_CACHE_DIR=1
-    ports:
-      - "9012:8000"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/docs"]
-      interval: 10s
-      timeout: 3s
-      retries: 12
-      start_period: 10s
-    restart: unless-stopped
+# running on nm-linux
+  # skb-nomic-embed:
+  #   build: ./packages/nomic-embed
+  #   image: nomic-embed:latest
+  #   container_name: skb-nomic-embed
+  #   # Make sure the app listens on 0.0.0.0:8000 in the container
+  #   command: >
+  #     sh -c 'python -c "import sys; print(sys.version)" &&
+  #            uvicorn server:app --host 0.0.0.0 --port 8000'
+  #   environment:
+  #     # Optional, but helps avoid tzdata/apt prompts if you build inside
+  #     - PYTHONUNBUFFERED=1
+  #     - PIP_NO_CACHE_DIR=1
+  #   ports:
+  #     - "9012:8000"
+  #   healthcheck:
+  #     test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/docs"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 12
+  #     start_period: 10s
+  #   restart: unless-stopped
 
     # OLD
   # ollama-embeddings:

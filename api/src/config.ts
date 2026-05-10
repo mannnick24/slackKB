@@ -86,6 +86,32 @@ function requireEnv(name: string): string {
   return v;
 }
 
+function parseLlmProviderTypeFromEnv(): LlmProviderType {
+  const raw = (process.env.LLM_PROVIDER_TYPE ?? "OPENAI").trim().toUpperCase();
+  if (raw === "OLLAMA") return LlmProviderType.OLLAMA;
+  if (raw === "ANTHROPIC") return LlmProviderType.ANTHROPIC;
+  if (raw === "CUSTOM") return LlmProviderType.CUSTOM;
+  return LlmProviderType.OPENAI;
+}
+
+/** Accepts EMBEDDING_PROVIDER_TYPE or EMBEDDING_PROVIDER (e.g. `default` from .env). */
+function parseEmbeddingProviderTypeFromEnv(): EmbeddingProviderType {
+  const raw = (
+    process.env.EMBEDDING_PROVIDER_TYPE ??
+    process.env.EMBEDDING_PROVIDER ??
+    "default"
+  )
+    .trim()
+    .toLowerCase();
+  if (raw === "openai") return EmbeddingProviderType.OPENAI;
+  if (raw === "ollama") return EmbeddingProviderType.OLLAMA;
+  if (raw === "other") return EmbeddingProviderType.OTHER;
+  return EmbeddingProviderType.DEFAULT;
+}
+
+const resolvedLlmProviderType = parseLlmProviderTypeFromEnv();
+const resolvedEmbeddingProviderType = parseEmbeddingProviderTypeFromEnv();
+
 export const config: AppConfig = {
   defaultOrg: "default_org",
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -115,19 +141,34 @@ export const config: AppConfig = {
 
   llmConfig: {
     model: process.env.LLM_MODEL ?? "gpt-4o-mini",
-    type: "openai",
+    type: (process.env.LLM_PROVIDER_TYPE ?? "openai").toLowerCase(),
     temperature: Number(process.env.LLM_TEMPERATURE ?? "0.7"),
-    baseUrl: process.env.LLM_BASE_URL ?? "https://api.openai.com/v1",
+    baseUrl:
+      process.env.LLM_BASE_URL ??
+      (resolvedLlmProviderType === LlmProviderType.OLLAMA
+        ? "http://localhost:11434/v1"
+        : "https://api.openai.com/v1"),
     apiKey: process.env.LLM_API_KEY ?? "",
   },
   defaultAgentPrompt: process.env.DEFAULT_AGENT_PROMPT ?? "",
-  llmProviderType: LlmProviderType.OPENAI,
-  embeddingProviderType: EmbeddingProviderType.DEFAULT,
+  llmProviderType: resolvedLlmProviderType,
+  embeddingProviderType: resolvedEmbeddingProviderType,
   embeddingConfig: {
-    type: process.env.EMBEDDING_PROVIDER_TYPE ? (process.env.EMBEDDING_PROVIDER_TYPE as EmbeddingProviderType) : EmbeddingProviderType.DEFAULT,
-    model: process.env.EMBEDDING_MODEL ?? "nomic-embed-text-v1.5",
+    type: resolvedEmbeddingProviderType,
+    /** Matches docker-compose `skb-nomic-embed` image / typical local nomic service name */
+    model: process.env.EMBEDDING_MODEL ?? "nomic-embed-text",
     dimensions: Number(process.env.EMBEDDING_DIMENSIONS ?? "768"),
-    host: process.env.EMBEDDING_HOST ?? "http://localhost:9012/embed",
-    apiKey: process.env.EMBEDDING_API_KEY ?? "",
+    /** DEFAULT/nomic (docker skb-nomic-embed): `9012:8000` → POST `/embed`. OpenAI-compatible: set `EMBEDDING_HOST` to API base (e.g. `https://api.openai.com/v1`). */
+    host: (() => {
+      if (process.env.EMBEDDING_HOST?.trim()) return process.env.EMBEDDING_HOST.trim();
+      if (
+        resolvedEmbeddingProviderType === EmbeddingProviderType.OPENAI ||
+        resolvedEmbeddingProviderType === EmbeddingProviderType.OTHER
+      ) {
+        return "https://api.openai.com/v1";
+      }
+      return "http://localhost:9012/embed";
+    })(),
+    apiKey: process.env.EMBEDDING_API_KEY ?? process.env.OPENAI_API_KEY ?? "",
   },
 };

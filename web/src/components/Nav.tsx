@@ -18,6 +18,7 @@ export function Nav() {
       <div style={{ fontWeight: 800, marginBottom: 16 }}>slackKB</div>
       {item("/", "Chat", chatActive)}
       {item("/config", "Config", loc.pathname === "/config")}
+      {item("/status", "Status", loc.pathname === "/status")}
     </aside>
   );
 }

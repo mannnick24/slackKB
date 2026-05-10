@@ -12,6 +12,28 @@ function getPool() {
     }
     return pool;
 }
+/** Lightweight connectivity check (matches docker-compose `skb-postgres` / `PG_CONNECTION_STRING`). */
+export async function pingPostgres() {
+    const start = Date.now();
+    try {
+        const p = getPool();
+        const client = await p.connect();
+        try {
+            await client.query("SELECT 1");
+            return { ok: true, latencyMs: Date.now() - start };
+        }
+        finally {
+            client.release();
+        }
+    }
+    catch (e) {
+        return {
+            ok: false,
+            latencyMs: Date.now() - start,
+            error: e?.message ?? String(e),
+        };
+    }
+}
 async function ensureRagChunksSchema(client) {
     await client.query("CREATE EXTENSION IF NOT EXISTS vector");
     await client.query(`

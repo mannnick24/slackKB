@@ -3,6 +3,7 @@ import type {
   ChatCompletionResponse,
   DocumentIngestMode,
   PublicAppConfig,
+  SystemStatusResponse,
   UploadDocumentResponse,
 } from "./types";
 
@@ -32,6 +33,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   getServerConfig: () => request<PublicAppConfig>("/api/v1/config"),
+
+  getSystemStatus: () => request<SystemStatusResponse>("/api/v1/status"),
 
   /** Non-streaming chat; server merges system prompt + RAG tools. */
   chatCompletion: (messages: ChatCompletionMessage[]) =>
