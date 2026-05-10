@@ -1,0 +1,79 @@
+services:
+  skb-postgres:
+    image: pgvector/pgvector:pg16   # PostgreSQL 16 with pgvector preinstalled
+    container_name: skb-pgvector-local
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: supersecurepassword
+      POSTGRES_DB: aic-db
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      # Where PostgreSQL stores its data locally
+      - pgdata:/var/lib/postgresql/data
+      
+      # Optional: run SQL scripts at startup (migrations, CREATE EXTENSION, etc.)
+      - ./init:/docker-entrypoint-initdb.d
+
+  skb-nomic-embed:
+    build: ./packages/nomic-embed
+    image: nomic-embed:latest
+    container_name: skb-nomic-embed
+    # Make sure the app listens on 0.0.0.0:8000 in the container
+    command: >
+      sh -c 'python -c "import sys; print(sys.version)" &&
+             uvicorn server:app --host 0.0.0.0 --port 8000'
+    environment:
+      # Optional, but helps avoid tzdata/apt prompts if you build inside
+      - PYTHONUNBUFFERED=1
+      - PIP_NO_CACHE_DIR=1
+    ports:
+      - "9012:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/docs"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+    # OLD
+  # ollama-embeddings:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama-embeddings
+  #   # Map a different host port to avoid clashing with a host Ollama on 11434
+  #   ports:
+  #     - "11435:11434"
+  #   # Persist pulled models between restarts
+  #   volumes:
+  #     - ollama_models:/root/.ollama
+  #   # (Optional) Enable NVIDIA GPU in Docker. Comment out if CPU-only.
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - capabilities: ["gpu"]
+  #   # Healthcheck: wait for the server to come up
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 12
+  #   # Pull nomic-embed-text on container start, then start the server
+  #   entrypoint: ["/bin/sh","-lc"]
+  #   command: >
+  #     "ollama serve & 
+  #      until curl -sf http://localhost:11434/api/version >/dev/null; do sleep 1; done &&
+  #      ollama pull nomic-embed-text &&
+  #      tail -f /dev/null"
+
+volumes:
+  pgdata:     
+  # ollama_models: 
+
+  
+
