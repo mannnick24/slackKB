@@ -1,8 +1,50 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { DocumentIngestMode } from "../api/types";
+import type { DocumentIngestMode, UploadJobProgress } from "../api/types";
 import { Layout } from "../components/Layout";
+
+/** Rotating arc; use while ingest is in flight (server % can plateau before 100). */
+function IngestWorkingSpinner() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 50 50"
+      aria-hidden
+      style={{ flexShrink: 0, display: "block", color: "#333" }}
+    >
+      <circle
+        cx="25"
+        cy="25"
+        r="20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="4"
+        opacity={0.2}
+      />
+      <circle
+        cx="25"
+        cy="25"
+        r="20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinecap="round"
+        strokeDasharray="31.4 125.6"
+      >
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from="0 25 25"
+          to="360 25 25"
+          dur="0.75s"
+          repeatCount="indefinite"
+        />
+      </circle>
+    </svg>
+  );
+}
 
 export function ConfigPage() {
   const qc = useQueryClient();
@@ -14,39 +56,24 @@ export function ConfigPage() {
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [ingestMode, setIngestMode] = useState<DocumentIngestMode>("text");
-  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadJob, setUploadJob] = useState<UploadJobProgress | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const uploadMutation = useMutation({
     mutationFn: ({ file, mode }: { file: File; mode: DocumentIngestMode }) =>
-      api.uploadDocument(file, mode),
-    onMutate: () => {
-      setUploadProgress(5);
-    },
+      api.uploadDocument(file, mode, {
+        onProgress: (p) => setUploadJob(p),
+      }),
     onSuccess: () => {
-      setUploadProgress(100);
       setSelectedFile(null);
+      setUploadJob(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
       qc.invalidateQueries({ queryKey: ["documents", "vectors", "count"] });
     },
     onError: () => {
-      setUploadProgress(100);
-    },
-    onSettled: () => {
-      setTimeout(() => setUploadProgress(0), 500);
+      setUploadJob(null);
     },
   });
-
-  useEffect(() => {
-    if (!uploadMutation.isPending) return;
-    const interval = setInterval(() => {
-      setUploadProgress((prev) => {
-        if (prev >= 90) return prev;
-        return prev + 5;
-      });
-    }, 500);
-    return () => clearInterval(interval);
-  }, [uploadMutation.isPending]);
 
   const clearVectorsMutation = useMutation({
     mutationFn: () => api.clearDocumentVectors(),
@@ -181,8 +208,36 @@ export function ConfigPage() {
           )}
         </div>
         {uploadMutation.isPending && (
-          <div style={{ marginTop: 8, fontSize: 13 }}>
-            Processing document… {uploadProgress}%
+          <div
+            style={{ marginTop: 8, fontSize: 13, opacity: 0.9 }}
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <IngestWorkingSpinner />
+              <div style={{ minWidth: 0 }}>
+                {uploadJob ? (
+                  <>
+                    <div>
+                      {uploadJob.stage} — {uploadJob.percent}%
+                      {uploadJob.filesProcessed !== undefined
+                        ? ` · ${uploadJob.filesProcessed} item(s) seen`
+                        : null}
+                      {uploadJob.chunksStored !== undefined && uploadJob.chunksStored > 0
+                        ? ` · ${uploadJob.chunksStored} vector(s) stored`
+                        : null}
+                    </div>
+                    <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
+                      The percent can stay flat while embeddings or DB writes run—the spinner means the job
+                      is still active. Job <code>{uploadJob.jobId.slice(0, 8)}…</code>.
+                    </div>
+                  </>
+                ) : (
+                  <div>Starting ingest… (waiting for job id from the server)</div>
+                )}
+              </div>
+            </div>
           </div>
         )}
         {uploadMutation.data && (

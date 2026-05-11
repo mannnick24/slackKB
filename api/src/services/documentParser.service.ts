@@ -8,6 +8,15 @@ import path from "node:path";
 import unzipper from "unzipper";
 import { logger } from "../logger.js";
 
+/** Structured Slack fields stored on rag_chunks (optional on ParsedDocument). */
+export interface ParsedSlackChunkMeta {
+    /** From Slack ts; null if ts was missing or unparsable */
+    messageAt: Date | null;
+    channel: string;
+    userId: string | null;
+    userLabel: string;
+}
+
 export interface ParsedDocument {
     /** Display name (filename or archive entry path). */
     name: string;
@@ -17,6 +26,8 @@ export interface ParsedDocument {
      * Stable id for dedupe within an org (e.g. Slack client_msg_id). When set, DB skips duplicates.
      */
     ingestKey?: string;
+    /** Set for Slack archive messages so ingest can populate indexed columns */
+    slack?: ParsedSlackChunkMeta;
 }
 
 export type DocumentHandler = (doc: ParsedDocument) => Promise<void> | void;

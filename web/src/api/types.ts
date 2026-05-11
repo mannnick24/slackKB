@@ -6,6 +6,23 @@ export type UploadDocumentResponse = {
   errors?: string[];
 };
 
+/** GET `/api/v1/documents/upload/jobs/:jobId/progress` */
+export type UploadJobStatus = "queued" | "running" | "completed" | "failed";
+
+export type UploadJobProgress = {
+  jobId: string;
+  status: UploadJobStatus;
+  stage: string;
+  percent: number;
+  filename?: string;
+  ingestMode?: string;
+  filesProcessed?: number;
+  chunksStored?: number;
+  result?: UploadDocumentResponse;
+  error?: string;
+  details?: string[];
+};
+
 /** Matches multipart field `ingestMode` on POST `/documents/upload`. */
 export type DocumentIngestMode = "text" | "slack_archive";
 
@@ -59,6 +76,19 @@ export type PublicAppConfig = {
 export type ChatCompletionMessage = {
   role: "user" | "assistant" | "system";
   content: string;
+};
+
+/** Optional RAG slice; ISO 8601 for times. `timeToExclusive` is an exclusive upper bound. */
+export type RagFiltersPayload = {
+  timeFrom?: string;
+  timeToExclusive?: string;
+  channels?: string[];
+  userIds?: string[];
+};
+
+export type RagFilterUserOption = {
+  id: string;
+  label: string;
 };
 
 export type ChatCompletionResponse = {

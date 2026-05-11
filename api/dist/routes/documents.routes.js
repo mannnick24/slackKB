@@ -7,9 +7,11 @@ import { getChunkCountByOrg, deleteChunksByOrg } from "../db/vectorRepo.js";
 import { CryptoService } from "../services/crypto.service.js";
 import { EmbeddingService } from "../services/embedding.service.js";
 import { ingestFile, ingestFileStreamedFromPath, ingestSlackArchiveStreamedFromPath, } from "../services/ingest.service.js";
+import { createIngestJob, getIngestJob, ingestJobComplete, ingestJobFail, ingestJobProgress, ingestJobStart, } from "../services/ingestJobStore.js";
 import { getSupportedExtensions } from "../services/documentParser.service.js";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
+import { invalidateRagFilterCache } from "../services/ragFilterCache.service.js";
 function parseIngestMode(raw) {
     const v = String(raw ?? "")
         .trim()
@@ -19,10 +21,70 @@ function parseIngestMode(raw) {
         return "slack_archive";
     return "text";
 }
+async function runIngestJob(jobId, orgId, embeddingService, ctx) {
+    ingestJobStart(jobId);
+    const report = (patch) => ingestJobProgress(jobId, patch);
+    try {
+        let result;
+        if (ctx.isZip && ctx.zipTmpPath) {
+            try {
+                if (ctx.ingestMode === "slack_archive") {
+                    result = await ingestSlackArchiveStreamedFromPath(orgId, ctx.zipTmpPath, ctx.filename, embeddingService, report);
+                }
+                else {
+                    result = await ingestFileStreamedFromPath(orgId, ctx.zipTmpPath, ctx.filename, embeddingService, report);
+                }
+            }
+            finally {
+                await unlink(ctx.zipTmpPath).catch(() => { });
+                logger.debug({ tmpPath: ctx.zipTmpPath, ingestMode: ctx.ingestMode }, "documents: temp zip removed");
+            }
+        }
+        else if (ctx.fileBuffer) {
+            result = await ingestFile(orgId, ctx.fileBuffer, ctx.filename, embeddingService, report);
+        }
+        else {
+            ingestJobFail(jobId, "No file uploaded");
+            return;
+        }
+        if (result.errors.length > 0 && result.chunksStored === 0) {
+            ingestJobFail(jobId, "Ingest failed", result.errors);
+            return;
+        }
+        const warnings = [];
+        if (result.skippedDuplicates > 0) {
+            warnings.push(`Skipped ${result.skippedDuplicates} duplicate vector(s) (same ingest key already stored for this org).`);
+        }
+        logger.debug({
+            ingestMode: ctx.ingestMode,
+            filename: ctx.filename,
+            filesProcessed: result.filesProcessed,
+            chunksStored: result.chunksStored,
+            skippedDuplicates: result.skippedDuplicates,
+            warningCount: warnings.length,
+            errorCount: result.errors.length,
+            jobId,
+        }, "documents: ingest complete");
+        ingestJobComplete(jobId, result, warnings.length > 0 ? warnings : undefined);
+        invalidateRagFilterCache(orgId, "ingest_complete");
+    }
+    catch (err) {
+        logger.error({ err, jobId }, "documents: ingest job error");
+        ingestJobFail(jobId, err?.message ?? String(err));
+    }
+}
 export async function documentsRoutes(app) {
     const defaultOrg = config.defaultOrg;
     const cryptoService = new CryptoService();
     const embeddingService = new EmbeddingService(cryptoService);
+    app.get("/documents/upload/jobs/:jobId/progress", async (req, reply) => {
+        const { jobId } = req.params;
+        const snapshot = getIngestJob(jobId);
+        if (!snapshot) {
+            return reply.code(404).send({ error: "Unknown job id", jobId });
+        }
+        return reply.send(snapshot);
+    });
     app.post("/documents/upload", async (req, reply) => {
         let ingestMode = "text";
         /** Multipart file streams must be consumed inside the parts loop or busboy blocks further parts. */
@@ -76,55 +138,20 @@ export async function documentsRoutes(app) {
                 error: "Slack archive ingest requires a .zip file (Slack export).",
             });
         }
-        let result;
-        if (isZip && zipTmpPath) {
-            try {
-                if (ingestMode === "slack_archive") {
-                    logger.debug({ filename, orgId: defaultOrg }, "documents: starting Slack archive ingest");
-                    result = await ingestSlackArchiveStreamedFromPath(defaultOrg, zipTmpPath, filename, embeddingService);
-                }
-                else {
-                    result = await ingestFileStreamedFromPath(defaultOrg, zipTmpPath, filename, embeddingService);
-                }
-            }
-            finally {
-                await unlink(zipTmpPath).catch(() => { });
-                logger.debug({ tmpPath: zipTmpPath, ingestMode }, "documents: temp zip removed");
-            }
-        }
-        else if (fileBuffer) {
-            result = await ingestFile(defaultOrg, fileBuffer, filename, embeddingService);
-        }
-        else {
-            return reply.code(400).send({ error: "No file uploaded. Use multipart with field `file`." });
-        }
-        if (result.errors.length > 0 && result.chunksStored === 0) {
-            logger.debug({ ingestMode, filename, errors: result.errors }, "documents: ingest failed (no vectors stored)");
-            return reply.code(400).send({
-                error: "Ingest failed",
-                details: result.errors,
-            });
-        }
-        const warnings = [];
-        if (result.skippedDuplicates > 0) {
-            warnings.push(`Skipped ${result.skippedDuplicates} duplicate vector(s) (same ingest key already stored for this org).`);
-        }
-        logger.debug({
+        const jobId = createIngestJob({ filename, ingestMode });
+        const work = {
             ingestMode,
             filename,
-            filesProcessed: result.filesProcessed,
-            chunksStored: result.chunksStored,
-            skippedDuplicates: result.skippedDuplicates,
-            warningCount: warnings.length,
-            errorCount: result.errors.length,
-        }, "documents: ingest complete");
-        return reply.send({
-            filesProcessed: result.filesProcessed,
-            chunksStored: result.chunksStored,
-            skippedDuplicates: result.skippedDuplicates,
-            warnings: warnings.length > 0 ? warnings : undefined,
-            errors: result.errors.length > 0 ? result.errors : undefined,
+            isZip,
+            zipTmpPath,
+            fileBuffer,
+        };
+        void runIngestJob(jobId, defaultOrg, embeddingService, work).catch((err) => {
+            logger.error({ err, jobId }, "documents: ingest job unhandled rejection");
+            ingestJobFail(jobId, err?.message ?? String(err));
         });
+        logger.info({ filename, ingestMode, orgId: defaultOrg, jobId }, "documents: upload accepted, ingest started");
+        return reply.code(202).send({ jobId });
     });
     app.get("/documents/supported-formats", async (req, reply) => {
         return reply.send({ extensions: getSupportedExtensions() });
@@ -135,6 +162,7 @@ export async function documentsRoutes(app) {
     });
     app.delete("/documents/vectors", async (req, reply) => {
         const deleted = await deleteChunksByOrg(defaultOrg);
+        invalidateRagFilterCache(defaultOrg, "vectors_cleared");
         return reply.send({ deleted });
     });
 }

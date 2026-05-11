@@ -7,6 +7,9 @@ import OpenAI from "openai";
 import { CryptoService } from "./crypto.service.js";
 import * as vectorRepo from "../db/vectorRepo.js";
 import { config } from "../config.js";
+import type { RagChunkSearchFilters } from "../types/ragFilters.js";
+import { logger } from "../logger.js";
+import { summarizeRagChunkSearchFilters } from "../utils/ragFiltersLog.js";
 
 const DEFAULT_MODEL = "text-embedding-3-small";
 const DEFAULT_DIMENSIONS = 768;
@@ -223,30 +226,49 @@ export class EmbeddingService {
     return vectors[0] ?? [];
   }
 
-  
-/**
- * Retrieve context for dynamic prompt enhancement (e.g. prepend to system prompt).
- */
- async getRagContextForPrompt(
-  orgId: string,
-  query: string,
-  limit: number = DEFAULT_SEARCH_LIMIT
-): Promise<string> {
-  if (!query.trim()) return "";
-  try {
+  /**
+   * Retrieve context for dynamic prompt enhancement (e.g. prepend to system prompt).
+   */
+  async getRagContextForPrompt(
+    orgId: string,
+    query: string,
+    limit: number = DEFAULT_SEARCH_LIMIT,
+    filters?: RagChunkSearchFilters
+  ): Promise<string> {
+    if (!query.trim()) return "";
+    try {
+      logger.debug(
+        {
+          orgId,
+          limit,
+          queryChars: query.length,
+          queryPreview: query.slice(0, 120),
+          ...summarizeRagChunkSearchFilters(filters),
+        },
+        "embed: getRagContextForPrompt"
+      );
       const embeddingCfg = await this.getConfig(orgId);
       const embedding = await this.embedQuery(orgId, query);
       const rows = await vectorRepo.searchChunks(
+        orgId,
+        embedding,
+        embeddingCfg.dimensions,
+        embeddingCfg.model,
+        limit,
+        filters
+      );
+      logger.debug(
+        {
           orgId,
-          embedding,
-          embeddingCfg.dimensions,
-          embeddingCfg.model,
-          limit
+          rowCount: rows.length,
+          ...summarizeRagChunkSearchFilters(filters),
+        },
+        "embed: getRagContextForPrompt result"
       );
       if (rows.length === 0) return "";
       return "Relevant knowledge base excerpts:\n" + rows.map((r) => r.content_text).join("\n\n---\n\n");
-  } catch {
+    } catch {
       return "";
+    }
   }
-}
 }

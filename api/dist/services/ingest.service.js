@@ -16,7 +16,9 @@ import { ingestKeyForTextChunk } from "./ingestKey.util.js";
 export async function ingestDocuments(orgId, documents, embeddingService, sourceName, options) {
     logger.debug({ documentCount: documents.length }, "ingest: documents batch");
     const errors = [];
+    const report = options?.onProgress;
     if (documents.length === 0) {
+        report?.({ stage: "Done", percent: 100, filesProcessed: 0, chunksStored: 0 });
         return { filesProcessed: 0, chunksStored: 0, skippedDuplicates: 0, errors };
     }
     let totalChunksStored = 0;
@@ -33,12 +35,22 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
             errors: [e?.message ?? String(e)],
         };
     }
+    report?.({ stage: "Chunking", percent: 12, filesProcessed: 0, chunksStored: 0 });
     // Process one document at a time to reduce peak memory usage:
     // - chunk per document
     // - embed that document's chunks
     // - insert those chunks
     const singleChunk = options?.singleChunkPerDocument === true;
-    for (const doc of documents) {
+    const n = documents.length;
+    for (let docIndex = 0; docIndex < documents.length; docIndex++) {
+        const doc = documents[docIndex];
+        const pctBase = 15 + (docIndex / Math.max(n, 1)) * 75;
+        report?.({
+            stage: "Embedding",
+            percent: Math.round(pctBase),
+            filesProcessed: docIndex,
+            chunksStored: totalChunksStored,
+        });
         logger.debug({ documentName: doc.name }, "ingest: document");
         const docChunks = singleChunk
             ? (() => {
@@ -64,6 +76,7 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
             continue;
         }
         const uploadLabel = sourceName ?? "";
+        const slack = doc.slack;
         const toInsert = docChunks
             .map((c, i) => ({
             text: c.text,
@@ -72,6 +85,10 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
             embeddingModel: embeddingConfig.model,
             embeddingDimensions: embeddingConfig.dimensions,
             ingestKey: ingestKeyForTextChunk(orgId, uploadLabel, doc.name, c.index, c.text),
+            slackMessageAt: slack?.messageAt ?? null,
+            slackChannel: slack?.channel ?? null,
+            slackUserId: slack?.userId ?? null,
+            slackUserLabel: slack?.userLabel ?? null,
         }))
             .filter((row) => row.embedding.length > 0);
         if (toInsert.length === 0)
@@ -86,7 +103,19 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
             // Skip this document's chunks but continue with others.
             continue;
         }
+        report?.({
+            stage: "Storing",
+            percent: Math.round(15 + ((docIndex + 1) / Math.max(n, 1)) * 80),
+            filesProcessed: docIndex + 1,
+            chunksStored: totalChunksStored,
+        });
     }
+    report?.({
+        stage: "Done",
+        percent: 100,
+        filesProcessed: documents.length,
+        chunksStored: totalChunksStored,
+    });
     return {
         filesProcessed: documents.length,
         chunksStored: totalChunksStored,
@@ -98,7 +127,8 @@ export async function ingestDocuments(orgId, documents, embeddingService, source
  * Ingest a single uploaded file buffer (e.g. from multipart).
  * Parses by filename, then runs ingestDocuments.
  */
-export async function ingestFile(orgId, buffer, filename, embeddingService) {
+export async function ingestFile(orgId, buffer, filename, embeddingService, onProgress) {
+    onProgress?.({ stage: "Parsing", percent: 4, filesProcessed: 0, chunksStored: 0 });
     let documents;
     try {
         logger.debug({ filename }, "ingest: parse buffer");
@@ -113,7 +143,13 @@ export async function ingestFile(orgId, buffer, filename, embeddingService) {
         };
     }
     logger.info({ filename, documentCount: documents.length }, "ingest: from buffer");
-    return ingestDocuments(orgId, documents, embeddingService, filename);
+    onProgress?.({
+        stage: "Parsed",
+        percent: 10,
+        filesProcessed: documents.length,
+        chunksStored: 0,
+    });
+    return ingestDocuments(orgId, documents, embeddingService, filename, { onProgress });
 }
 /**
  * Ingest a single uploaded file from disk (e.g. large zip streamed to a temp file).
@@ -138,8 +174,9 @@ export async function ingestFileFromPath(orgId, filePath, filename, embeddingSer
  * Streamed ingest from a file path: parse documents one by one and ingest
  * each document's chunks immediately. Useful for large zip archives.
  */
-export async function ingestFileStreamedFromPath(orgId, filePath, filename, embeddingService) {
+export async function ingestFileStreamedFromPath(orgId, filePath, filename, embeddingService, onProgress) {
     logger.info({ filename }, "ingest: streamed zip from path");
+    onProgress?.({ stage: "Parsing archive", percent: 6, filesProcessed: 0, chunksStored: 0 });
     const errors = [];
     let filesProcessed = 0;
     let chunksStored = 0;
@@ -159,6 +196,12 @@ export async function ingestFileStreamedFromPath(orgId, filePath, filename, embe
     const handleDoc = async (doc) => {
         logger.debug({ documentName: doc.name }, "ingest: zip entry");
         filesProcessed += 1;
+        onProgress?.({
+            stage: "Processing files",
+            percent: Math.min(96, Math.round(8 + 22 * Math.log2(filesProcessed + 1))),
+            filesProcessed,
+            chunksStored,
+        });
         const docChunks = chunkText(doc.text).map((c) => ({
             sourceName: doc.name,
             text: c.text,
@@ -177,6 +220,7 @@ export async function ingestFileStreamedFromPath(orgId, filePath, filename, embe
             return;
         }
         const uploadLabel = filename ?? "";
+        const slack = doc.slack;
         const toInsert = docChunks
             .map((c, i) => ({
             text: c.text,
@@ -185,6 +229,10 @@ export async function ingestFileStreamedFromPath(orgId, filePath, filename, embe
             embeddingModel: embeddingConfig.model,
             embeddingDimensions: embeddingConfig.dimensions,
             ingestKey: ingestKeyForTextChunk(orgId, uploadLabel, doc.name, c.index, c.text),
+            slackMessageAt: slack?.messageAt ?? null,
+            slackChannel: slack?.channel ?? null,
+            slackUserId: slack?.userId ?? null,
+            slackUserLabel: slack?.userLabel ?? null,
         }))
             .filter((row) => row.embedding.length > 0);
         if (toInsert.length === 0)
@@ -204,6 +252,12 @@ export async function ingestFileStreamedFromPath(orgId, filePath, filename, embe
     catch (e) {
         errors.push(e?.message ?? String(e));
     }
+    onProgress?.({
+        stage: "Done",
+        percent: 100,
+        filesProcessed,
+        chunksStored,
+    });
     return {
         filesProcessed,
         chunksStored,
@@ -215,8 +269,9 @@ export async function ingestFileStreamedFromPath(orgId, filePath, filename, embe
  * Slack export zip: one vector per message object (no chunking). Streams JSON files from the archive.
  * Embeddings are requested in batches (see config.ingestEmbedBatchSize).
  */
-export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filename, embeddingService) {
+export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filename, embeddingService, onProgress) {
     logger.info({ filename, orgId }, "ingest: Slack archive from path");
+    onProgress?.({ stage: "Parsing Slack export", percent: 5, filesProcessed: 0, chunksStored: 0 });
     const errors = [];
     let filesProcessed = 0;
     let chunksStored = 0;
@@ -251,6 +306,10 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
             embeddingModel: embeddingConfig.model,
             embeddingDimensions: embeddingConfig.dimensions,
             ingestKey: row.ingestKey,
+            slackMessageAt: row.slackMessageAt,
+            slackChannel: row.slackChannel,
+            slackUserId: row.slackUserId,
+            slackUserLabel: row.slackUserLabel,
         }))
             .filter((row) => row.embedding.length > 0);
         if (toInsert.length === 0)
@@ -258,6 +317,12 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
         const ins = await vectorRepo.insertChunks(orgId, toInsert);
         chunksStored += ins.inserted;
         skippedDuplicates += ins.skippedDuplicates;
+        onProgress?.({
+            stage: "Embedding and storing",
+            percent: Math.min(97, Math.round(10 + 18 * Math.log2(filesProcessed + 1))),
+            filesProcessed,
+            chunksStored,
+        });
         logger.debug({
             rowCount: rows.length,
             inserted: ins.inserted,
@@ -293,15 +358,26 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
     };
     const handleDoc = async (doc) => {
         filesProcessed += 1;
+        onProgress?.({
+            stage: "Reading messages",
+            percent: Math.min(92, Math.round(6 + 16 * Math.log2(filesProcessed + 1))),
+            filesProcessed,
+            chunksStored,
+        });
         const trimmed = doc.text.trim();
         if (!trimmed) {
             logger.debug({ sourceName: doc.name, ingestKey: doc.ingestKey }, "ingest: slack skip empty message body");
             return;
         }
+        const sm = doc.slack;
         pending.push({
             text: trimmed,
             sourceName: doc.name,
             ingestKey: doc.ingestKey ?? `slack:loc:${doc.name}`,
+            slackMessageAt: sm?.messageAt ?? null,
+            slackChannel: sm?.channel ?? null,
+            slackUserId: sm?.userId ?? null,
+            slackUserLabel: sm?.userLabel ?? null,
         });
         while (pending.length >= batchSize) {
             const batch = pending.splice(0, batchSize);
@@ -327,6 +403,12 @@ export async function ingestSlackArchiveStreamedFromPath(orgId, filePath, filena
         skippedDuplicates,
         errorCount: errors.length,
     }, "ingest: slack archive finished");
+    onProgress?.({
+        stage: "Done",
+        percent: 100,
+        filesProcessed,
+        chunksStored,
+    });
     return {
         filesProcessed,
         chunksStored,

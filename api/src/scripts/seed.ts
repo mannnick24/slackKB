@@ -87,6 +87,27 @@ async function ensurePgVectorInit(): Promise<void> {
       ON rag_chunks (org_id, ingest_key)
       WHERE ingest_key IS NOT NULL
     `);
+    await client.query(
+      "ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_message_at timestamptz"
+    );
+    await client.query("ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_channel text");
+    await client.query("ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_user_id text");
+    await client.query("ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_user_label text");
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_slack_time
+      ON rag_chunks (org_id, slack_message_at)
+      WHERE slack_message_at IS NOT NULL
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_slack_channel
+      ON rag_chunks (org_id, slack_channel)
+      WHERE slack_channel IS NOT NULL
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_slack_user
+      ON rag_chunks (org_id, slack_user_id)
+      WHERE slack_user_id IS NOT NULL
+    `);
     logger.info("seed: pgvector and rag_chunks initialized");
   } catch (err: any) {
     logger.warn({ err }, "seed: pgvector init skipped");

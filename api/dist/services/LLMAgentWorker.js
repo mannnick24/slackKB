@@ -5,6 +5,7 @@ import { CryptoService } from "./crypto.service.js";
 import { CommonToolFactory } from "../plugins/CommonToolFactory.js";
 import { createRagPlugin } from "../plugins/RagPlugin.js";
 import { logger } from "../logger.js";
+import { summarizeRagChunkSearchFilters } from "../utils/ragFiltersLog.js";
 /*
  * Worker to handle LLM interactions for an agent.
  * Uses org-level llmProvider (and apiKey) only.
@@ -12,7 +13,11 @@ import { logger } from "../logger.js";
 export class LlmAgentWorker {
     cachedOpenApi = null;
     embeddingService = new EmbeddingService(new CryptoService);
-    toolCallsHandler = new CommonToolFactory([createRagPlugin(this.embeddingService, config.defaultOrg)]);
+    makeToolHandler(ragFilters) {
+        return new CommonToolFactory([
+            createRagPlugin(this.embeddingService, config.defaultOrg, ragFilters),
+        ]);
+    }
     /** Resolve LLM config from org. Throws if org has no llmProvider. */
     async getLlmConfig() {
         return config.llmConfig;
@@ -33,19 +38,35 @@ export class LlmAgentWorker {
         let prompt = (systemPropmptFromConfig + " \n" +
             defaultAgentPrompt + " \n");
         if (options?.lastUserMessage) {
-            logger.debug("llm: fetching RAG context");
-            const ragContext = await this.embeddingService.getRagContextForPrompt(config.defaultOrg, options.lastUserMessage);
+            logger.debug({
+                lastUserMessageChars: options.lastUserMessage.length,
+                ...summarizeRagChunkSearchFilters(options.ragFilters),
+            }, "llm: fetching RAG context for system prompt");
+            const ragContext = await this.embeddingService.getRagContextForPrompt(config.defaultOrg, options.lastUserMessage, undefined, options.ragFilters);
             if (ragContext) {
+                logger.debug({ ragContextChars: ragContext.length, ...summarizeRagChunkSearchFilters(options.ragFilters) }, "llm: RAG context merged into system prompt");
                 prompt = prompt + "\n\n" + ragContext;
+            }
+            else {
+                logger.debug(summarizeRagChunkSearchFilters(options.ragFilters), "llm: no RAG context returned for system prompt");
             }
         }
         return prompt;
     }
-    async completionFromMessages(messages) {
+    async completionFromMessages(messages, options = {}) {
         const lastUserMessage = Array.isArray(messages)
             ? messages.filter((m) => m.role === "user").pop()?.content
             : undefined;
-        const systemContent = await this.getSystemPrompt({ lastUserMessage: typeof lastUserMessage === "string" ? lastUserMessage : undefined });
+        const ragFilters = options.ragFilters;
+        logger.debug({
+            messageCount: messages.length,
+            ...summarizeRagChunkSearchFilters(ragFilters),
+        }, "llm: completionFromMessages start");
+        const toolHandler = this.makeToolHandler(ragFilters);
+        const systemContent = await this.getSystemPrompt({
+            lastUserMessage: typeof lastUserMessage === "string" ? lastUserMessage : undefined,
+            ragFilters,
+        });
         const llmConfig = await this.getLlmConfig();
         const openapi = await this.getOpenApi();
         const model = llmConfig.model;
@@ -59,6 +80,7 @@ export class LlmAgentWorker {
                     ...messages,
                 ],
                 temperature,
+                tools: toolHandler.commonTools,
             };
             logger.debug({ model }, "llm: chat completion");
             let response = await openapi.chat.completions.create(opts);
@@ -70,7 +92,7 @@ export class LlmAgentWorker {
                     content: messageObject.content ?? null,
                     tool_calls: messageObject.tool_calls,
                 });
-                const toolCallsResponse = await this.toolCallsHandler?.handleToolCalls(messageObject);
+                const toolCallsResponse = await toolHandler.handleToolCalls(messageObject);
                 if (toolCallsResponse.result) {
                     messages.push(...toolCallsResponse.result);
                 }
@@ -86,6 +108,7 @@ export class LlmAgentWorker {
                         ...messages,
                     ],
                     temperature,
+                    tools: toolHandler.commonTools,
                 });
             }
             reply = response.choices[0].message?.content || "";
@@ -107,18 +130,24 @@ export class LlmAgentWorker {
      * Tool rounds use the same handler as the non-streaming path; only the chat completion request uses streaming.
      */
     async streamCompletionFromMessages(messages, options = {}) {
-        const { onTextDelta } = options;
+        const { onTextDelta, ragFilters } = options;
+        logger.debug({
+            messageCount: messages.length,
+            ...summarizeRagChunkSearchFilters(ragFilters),
+        }, "llm: streamCompletionFromMessages start");
         const lastUserMessage = Array.isArray(messages)
             ? messages.filter((m) => m.role === "user").pop()?.content
             : undefined;
+        const toolHandler = this.makeToolHandler(ragFilters);
         const systemContent = await this.getSystemPrompt({
             lastUserMessage: typeof lastUserMessage === "string" ? lastUserMessage : undefined,
+            ragFilters,
         });
         const llmConfig = await this.getLlmConfig();
         const openapi = await this.getOpenApi();
         const model = llmConfig.model;
         const temperature = llmConfig.temperature ?? 0.2;
-        const tools = this.toolCallsHandler?.commonTools;
+        const tools = toolHandler.commonTools;
         let reply = "";
         try {
             const toolCallsResponses = [];
@@ -131,7 +160,7 @@ export class LlmAgentWorker {
                 if (tools?.length) {
                     streamParams.tools = tools;
                 }
-                logger.debug({ model }, "llm: stream completion");
+                logger.debug({ model, ...summarizeRagChunkSearchFilters(ragFilters) }, "llm: stream completion round");
                 const stream = openapi.chat.completions.stream(streamParams);
                 if (onTextDelta) {
                     stream.on("content", (delta) => {
@@ -148,7 +177,7 @@ export class LlmAgentWorker {
                         content: messageObject.content ?? null,
                         tool_calls: messageObject.tool_calls,
                     });
-                    const toolCallsResponse = await this.toolCallsHandler?.handleToolCalls(messageObject);
+                    const toolCallsResponse = await toolHandler.handleToolCalls(messageObject);
                     if (toolCallsResponse?.result?.length) {
                         messages.push(...toolCallsResponse.result);
                     }

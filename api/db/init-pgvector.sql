@@ -40,3 +40,20 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_dim_model ON rag_chunks (org_id, e
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_chunks_org_ingest_key
 ON rag_chunks (org_id, ingest_key)
 WHERE ingest_key IS NOT NULL;
+
+ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_message_at timestamptz;
+ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_channel text;
+ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_user_id text;
+ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS slack_user_label text;
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_slack_time
+ON rag_chunks (org_id, slack_message_at)
+WHERE slack_message_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_slack_channel
+ON rag_chunks (org_id, slack_channel)
+WHERE slack_channel IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_slack_user
+ON rag_chunks (org_id, slack_user_id)
+WHERE slack_user_id IS NOT NULL;

@@ -34,6 +34,13 @@ function channelLabelFromPath(entryPath) {
         return path.basename(parts[0], ".json");
     return "slack";
 }
+/** Slack message ts is Unix seconds with fractional part as string. */
+function slackTsToMessageAt(ts) {
+    const n = parseFloat(ts);
+    if (!Number.isFinite(n))
+        return null;
+    return new Date(n * 1000);
+}
 function formatMessageDoc(obj, entryPath) {
     const text = typeof obj.text === "string" ? obj.text : "";
     const trimmed = text.trim();
@@ -45,6 +52,8 @@ function formatMessageDoc(obj, entryPath) {
     const userLabel = (prof && typeof prof.display_name === "string" && prof.display_name.trim()) ||
         (prof && typeof prof.real_name === "string" && prof.real_name.trim()) ||
         (typeof obj.user === "string" ? obj.user : "unknown");
+    const userIdRaw = typeof obj.user === "string" ? obj.user.trim() : "";
+    const userId = userIdRaw.length > 0 ? userIdRaw : null;
     const channel = channelLabelFromPath(entryPath);
     const body = [
         `Channel: ${channel}`,
@@ -60,7 +69,18 @@ function formatMessageDoc(obj, entryPath) {
     const ingestKey = clientMsgId
         ? `slack:msg:${clientMsgId}`
         : `slack:loc:${normPath}#${ts}`;
-    return { name, text: body, ingestKey };
+    const messageAt = slackTsToMessageAt(ts);
+    return {
+        name,
+        text: body,
+        ingestKey,
+        slack: {
+            messageAt,
+            channel,
+            userId,
+            userLabel: String(userLabel),
+        },
+    };
 }
 function extractMessagesFromJsonContent(raw, entryPath, stats) {
     const trimmed = raw.trim();

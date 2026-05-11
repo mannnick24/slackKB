@@ -7,6 +7,7 @@ import sensible from "@fastify/sensible";
 import { chatRoutes } from "./routes/chat.routes.js";
 import { configRoutes } from "./routes/config.routes.js";
 import { documentsRoutes } from "./routes/documents.routes.js";
+import { ragRoutes } from "./routes/rag.routes.js";
 import { statusRoutes } from "./routes/status.routes.js";
 export async function buildServer() {
     const app = Fastify({ loggerInstance: logger });
@@ -42,6 +43,7 @@ export async function buildServer() {
     await app.register(configRoutes, { prefix: "/api/v1" });
     await app.register(chatRoutes, { prefix: "/api/v1" });
     await app.register(documentsRoutes, { prefix: "/api/v1" });
+    await app.register(ragRoutes, { prefix: "/api/v1" });
     await app.register(statusRoutes, { prefix: "/api/v1" });
     // ...
     return app;

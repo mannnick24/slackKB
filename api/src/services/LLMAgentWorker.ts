@@ -7,12 +7,18 @@ import { CryptoService } from "./crypto.service.js";
 import { CommonToolFactory, ToolCallsResponse } from "../plugins/CommonToolFactory.js";
 import { createRagPlugin } from "../plugins/RagPlugin.js";
 import { logger } from "../logger.js";
+import type { RagChunkSearchFilters } from "../types/ragFilters.js";
+import { summarizeRagChunkSearchFilters } from "../utils/ragFiltersLog.js";
 
 
 export type LlmCompletionResponse = { reply: string; error?: string; finaliser: () => Promise<void> };
 
+export type CompletionFromMessagesOptions = {
+    ragFilters?: RagChunkSearchFilters;
+};
+
 /** Options for {@link LlmAgentWorker.streamCompletionFromMessages}. */
-export type StreamCompletionFromMessagesOptions = {
+export type StreamCompletionFromMessagesOptions = CompletionFromMessagesOptions & {
     /**
      * Called for each streamed text delta of the assistant message (final pass and any streamed text before tool calls).
      * For WebRTC AI voice, forward deltas to `TelsisWebRtcCall.feedAssistantVoiceDelta` and call
@@ -27,7 +33,12 @@ export type StreamCompletionFromMessagesOptions = {
 export class LlmAgentWorker {
     private cachedOpenApi: OpenAI | null = null;
     private embeddingService = new EmbeddingService(new CryptoService);
-    private toolCallsHandler = new CommonToolFactory([createRagPlugin(this.embeddingService, config.defaultOrg)]);
+
+    private makeToolHandler(ragFilters?: RagChunkSearchFilters): CommonToolFactory {
+        return new CommonToolFactory([
+            createRagPlugin(this.embeddingService, config.defaultOrg, ragFilters),
+        ]);
+    }
 
     /** Resolve LLM config from org. Throws if org has no llmProvider. */
     private async getLlmConfig(): Promise<LlmProvider> {
@@ -44,17 +55,40 @@ export class LlmAgentWorker {
         return this.cachedOpenApi;
     }
 
-    private async getSystemPrompt(options?: { lastUserMessage?: string }): Promise<string> {
+    private async getSystemPrompt(options?: {
+        lastUserMessage?: string;
+        ragFilters?: RagChunkSearchFilters;
+    }): Promise<string> {
         const systemPropmptFromConfig = config.systemPrompt || "";
         const defaultAgentPrompt = config.defaultAgentPrompt || "";
         let prompt = (
             systemPropmptFromConfig + " \n" +
             defaultAgentPrompt + " \n");
         if (options?.lastUserMessage) {
-            logger.debug("llm: fetching RAG context");
-            const ragContext = await this.embeddingService.getRagContextForPrompt(config.defaultOrg, options.lastUserMessage);
+            logger.debug(
+                {
+                    lastUserMessageChars: options.lastUserMessage.length,
+                    ...summarizeRagChunkSearchFilters(options.ragFilters),
+                },
+                "llm: fetching RAG context for system prompt"
+            );
+            const ragContext = await this.embeddingService.getRagContextForPrompt(
+                config.defaultOrg,
+                options.lastUserMessage,
+                undefined,
+                options.ragFilters
+            );
             if (ragContext) {
+                logger.debug(
+                    { ragContextChars: ragContext.length, ...summarizeRagChunkSearchFilters(options.ragFilters) },
+                    "llm: RAG context merged into system prompt"
+                );
                 prompt = prompt + "\n\n" + ragContext;
+            } else {
+                logger.debug(
+                    summarizeRagChunkSearchFilters(options.ragFilters),
+                    "llm: no RAG context returned for system prompt"
+                );
             }
         }
         return prompt;
@@ -62,12 +96,25 @@ export class LlmAgentWorker {
 
     public async completionFromMessages(
         messages: ChatCompletionMessageParam[],
+        options: CompletionFromMessagesOptions = {},
     ): Promise<LlmCompletionResponse> {
 
         const lastUserMessage = Array.isArray(messages)
             ? (messages.filter((m) => m.role === "user") as Array<{ content: string }>).pop()?.content
             : undefined;
-        const systemContent = await this.getSystemPrompt({ lastUserMessage: typeof lastUserMessage === "string" ? lastUserMessage : undefined });
+        const ragFilters = options.ragFilters;
+        logger.debug(
+            {
+                messageCount: messages.length,
+                ...summarizeRagChunkSearchFilters(ragFilters),
+            },
+            "llm: completionFromMessages start"
+        );
+        const toolHandler = this.makeToolHandler(ragFilters);
+        const systemContent = await this.getSystemPrompt({
+            lastUserMessage: typeof lastUserMessage === "string" ? lastUserMessage : undefined,
+            ragFilters,
+        });
         const llmConfig = await this.getLlmConfig();
         const openapi = await this.getOpenApi();
         const model = llmConfig.model;
@@ -81,6 +128,7 @@ export class LlmAgentWorker {
                     ...messages,
                 ],
                 temperature,
+                tools: toolHandler.commonTools,
             };
             logger.debug({ model }, "llm: chat completion");
             let response = await openapi.chat.completions.create(opts);
@@ -93,7 +141,7 @@ export class LlmAgentWorker {
                     content: messageObject.content ?? null,
                     tool_calls: messageObject.tool_calls,
                 });
-                const toolCallsResponse = await this.toolCallsHandler?.handleToolCalls(messageObject);
+                const toolCallsResponse = await toolHandler.handleToolCalls(messageObject);
                 if (toolCallsResponse.result) {
                     messages.push(...toolCallsResponse.result);
                 }
@@ -109,6 +157,7 @@ export class LlmAgentWorker {
                         ...messages,
                     ],
                     temperature,
+                    tools: toolHandler.commonTools,
                 });
             }
             reply = response.choices[0].message?.content || "";
@@ -133,18 +182,27 @@ export class LlmAgentWorker {
         messages: ChatCompletionMessageParam[],
         options: StreamCompletionFromMessagesOptions = {},
     ): Promise<LlmCompletionResponse> {
-        const { onTextDelta } = options;
+        const { onTextDelta, ragFilters } = options;
+        logger.debug(
+            {
+                messageCount: messages.length,
+                ...summarizeRagChunkSearchFilters(ragFilters),
+            },
+            "llm: streamCompletionFromMessages start"
+        );
         const lastUserMessage = Array.isArray(messages)
             ? (messages.filter((m) => m.role === "user") as Array<{ content: string }>).pop()?.content
             : undefined;
+        const toolHandler = this.makeToolHandler(ragFilters);
         const systemContent = await this.getSystemPrompt({
             lastUserMessage: typeof lastUserMessage === "string" ? lastUserMessage : undefined,
+            ragFilters,
         });
         const llmConfig = await this.getLlmConfig();
         const openapi = await this.getOpenApi();
         const model = llmConfig.model;
         const temperature = llmConfig.temperature ?? 0.2;
-        const tools = this.toolCallsHandler?.commonTools;
+        const tools = toolHandler.commonTools;
         let reply = "";
 
         try {
@@ -160,7 +218,10 @@ export class LlmAgentWorker {
                     streamParams.tools = tools;
                 }
 
-                logger.debug({ model }, "llm: stream completion");
+                logger.debug(
+                    { model, ...summarizeRagChunkSearchFilters(ragFilters) },
+                    "llm: stream completion round"
+                );
                 const stream = openapi.chat.completions.stream(streamParams);
                 if (onTextDelta) {
                     stream.on("content", (delta: string) => {
@@ -179,8 +240,7 @@ export class LlmAgentWorker {
                         content: messageObject.content ?? null,
                         tool_calls: messageObject.tool_calls,
                     });
-                    const toolCallsResponse =
-                        await this.toolCallsHandler?.handleToolCalls(messageObject);
+                    const toolCallsResponse = await toolHandler.handleToolCalls(messageObject);
                     if (toolCallsResponse?.result?.length) {
                         messages.push(...toolCallsResponse.result);
                     }

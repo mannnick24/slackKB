@@ -4,6 +4,9 @@
  */
 import OpenAI from "openai";
 import * as vectorRepo from "../db/vectorRepo.js";
+import { config } from "../config.js";
+import { logger } from "../logger.js";
+import { summarizeRagChunkSearchFilters } from "../utils/ragFiltersLog.js";
 const DEFAULT_MODEL = "text-embedding-3-small";
 const DEFAULT_DIMENSIONS = 768;
 const DEFAULT_SEARCH_LIMIT = 5;
@@ -95,84 +98,7 @@ export class EmbeddingService {
      * otherwise fallback to OPENAI_API_KEY env and default model.
      */
     async getConfig(orgId) {
-        // TODO from config
-        const enc = { provider: "default", model: "" };
-        if (enc) {
-            const provider = enc.provider.toLowerCase();
-            if (provider === "openai") {
-                const apiKey = enc.apiKeyEnc
-                    ? this.cryptoService.openJson(enc.apiKeyEnc)
-                    : process.env.OPENAI_API_KEY;
-                if (!apiKey) {
-                    throw new Error("OpenAI embedding config requires an API key");
-                }
-                return {
-                    type: "OPENAI",
-                    apiKey,
-                    model: enc.model || DEFAULT_MODEL,
-                    dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-                    host: enc.host,
-                };
-            }
-            if (provider === "ollama") {
-                return {
-                    type: "OLLAMA",
-                    model: enc.model || DEFAULT_MODEL,
-                    dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-                    host: enc.host || process.env.OLLAMA_EMBEDDING_HOST || "http://localhost:11434/api/embed",
-                };
-            }
-            if (provider === "default") {
-                return {
-                    type: "DEFAULT",
-                    model: enc.model || "nomic-embed-text-v1.5",
-                    dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-                    host: enc.host ||
-                        process.env.DEFAULT_EMBEDDING_HOST ||
-                        "http://localhost:9012/embed",
-                };
-            }
-            if (provider === "other") {
-                const apiKey = enc.apiKeyEnc
-                    ? this.cryptoService.openJson(enc.apiKeyEnc)
-                    : process.env.OPENAI_API_KEY;
-                if (!apiKey) {
-                    throw new Error("OTHER embedding provider requires an API key (org or OPENAI_API_KEY)");
-                }
-                return {
-                    type: "OTHER",
-                    apiKey,
-                    model: enc.model || DEFAULT_MODEL,
-                    dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-                    host: enc.host,
-                };
-            }
-            // Unknown provider: fall back to OpenAI semantics if possible.
-            const apiKey = enc.apiKeyEnc !== undefined
-                ? this.cryptoService.openJson(enc.apiKeyEnc)
-                : process.env.OPENAI_API_KEY;
-            if (!apiKey) {
-                throw new Error(`Unsupported embedding provider "${enc.provider}" and no OPENAI_API_KEY fallback is configured`);
-            }
-            return {
-                type: "OPENAI",
-                apiKey,
-                model: enc.model || DEFAULT_MODEL,
-                dimensions: enc.dimensions || DEFAULT_DIMENSIONS,
-                host: enc.host,
-            };
-        }
-        const fallbackKey = process.env.OPENAI_API_KEY;
-        if (!fallbackKey) {
-            throw new Error("No embedding config for org and OPENAI_API_KEY not set");
-        }
-        return {
-            type: "OPENAI",
-            apiKey: fallbackKey,
-            model: DEFAULT_MODEL,
-            dimensions: DEFAULT_DIMENSIONS,
-            host: undefined,
-        };
+        return config.embeddingConfig;
     }
     /**
      * Embed a list of texts for the given org. Returns one vector per text.
@@ -268,13 +194,25 @@ export class EmbeddingService {
     /**
      * Retrieve context for dynamic prompt enhancement (e.g. prepend to system prompt).
      */
-    async getRagContextForPrompt(orgId, query, limit = DEFAULT_SEARCH_LIMIT) {
+    async getRagContextForPrompt(orgId, query, limit = DEFAULT_SEARCH_LIMIT, filters) {
         if (!query.trim())
             return "";
         try {
+            logger.debug({
+                orgId,
+                limit,
+                queryChars: query.length,
+                queryPreview: query.slice(0, 120),
+                ...summarizeRagChunkSearchFilters(filters),
+            }, "embed: getRagContextForPrompt");
             const embeddingCfg = await this.getConfig(orgId);
             const embedding = await this.embedQuery(orgId, query);
-            const rows = await vectorRepo.searchChunks(orgId, embedding, embeddingCfg.dimensions, embeddingCfg.model, limit);
+            const rows = await vectorRepo.searchChunks(orgId, embedding, embeddingCfg.dimensions, embeddingCfg.model, limit, filters);
+            logger.debug({
+                orgId,
+                rowCount: rows.length,
+                ...summarizeRagChunkSearchFilters(filters),
+            }, "embed: getRagContextForPrompt result");
             if (rows.length === 0)
                 return "";
             return "Relevant knowledge base excerpts:\n" + rows.map((r) => r.content_text).join("\n\n---\n\n");
