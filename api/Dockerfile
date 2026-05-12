@@ -24,5 +24,5 @@ COPY --from=build --chown=node:node /workspace/api/dist ./dist
 USER node
 EXPOSE 3001
 
-# Set APP_ENC_KEY_B64, PG_CONNECTION_STRING, LLM_*, EMBEDDING_* at runtime (or --env-file)
-CMD ["node", "dist/main.js"]
+# With compose, bind-mount api/.env to /app/.env. Compose `environment` overrides win over file entries.
+CMD ["node", "--env-file=.env", "dist/main.js"]
