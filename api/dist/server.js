@@ -39,7 +39,7 @@ export async function buildServer() {
         reply.code(404).send({ statusCode: 404, error: 'Not Found', message: 'Route not found' });
     });
     await app.register(sensible);
-    await app.register(multipart, { limits: { fileSize: 20 * 1024 * 1024 } });
+    await app.register(multipart, { limits: { fileSize: config.maxMultipartFileBytes } });
     await app.register(configRoutes, { prefix: "/api/v1" });
     await app.register(chatRoutes, { prefix: "/api/v1" });
     await app.register(documentsRoutes, { prefix: "/api/v1" });

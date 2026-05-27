@@ -101,6 +101,11 @@ function embeddingFetchFailed(url: string, err: unknown): Error {
   return new Error(`Embedding HTTP request failed (${url}):${code} ${base}${cause}`);
 }
 
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export interface EmbeddingConfigResolved {
   /** Logical provider type used to select the client implementation. */
   type: EmbeddingProviderType;
@@ -155,19 +160,14 @@ export class EmbeddingService {
       const rawHost =
         cfg.host || process.env.OLLAMA_EMBEDDING_HOST || "http://localhost:11434/api/embed";
       const url = normalizeOllamaEmbedUrl(rawHost);
-      let resp: Response;
-      try {
-        resp = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: cfg.model,
-            input: texts.length === 1 ? texts[0] : texts,
-          }),
-        });
-      } catch (err) {
-        throw embeddingFetchFailed(url, err);
-      }
+      const resp = await this.fetchWithRetry(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: cfg.model,
+          input: texts.length === 1 ? texts[0] : texts,
+        }),
+      });
       const rawText = await resp.text();
       if (!resp.ok) {
         throw new Error(
@@ -190,16 +190,11 @@ export class EmbeddingService {
         process.env.DEFAULT_EMBEDDING_HOST ||
         "http://localhost:9012/embed";
       const url = normalizeDefaultEmbedUrl(rawHost);
-      let resp: Response;
-      try {
-        resp = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ texts }),
-        });
-      } catch (err) {
-        throw embeddingFetchFailed(url, err);
-      }
+      const resp = await this.fetchWithRetry(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ texts }),
+      });
       const rawText = await resp.text();
       if (!resp.ok) {
         throw new Error(
@@ -224,6 +219,40 @@ export class EmbeddingService {
   async embedQuery(orgId: string, query: string): Promise<number[]> {
     const vectors = await this.embed(orgId, [query]);
     return vectors[0] ?? [];
+  }
+
+  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const timeoutMs = config.embeddingRequestTimeoutMs;
+    const maxAttempts = Math.max(1, config.embeddingRetryCount + 1);
+    const baseBackoffMs = config.embeddingRetryBackoffMs;
+
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await fetch(url, {
+          ...init,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        return response;
+      } catch (err) {
+        lastErr = err;
+        if (attempt >= maxAttempts) break;
+        const delay = baseBackoffMs * attempt;
+        logger.warn(
+          {
+            url,
+            attempt,
+            maxAttempts,
+            delayMs: delay,
+            timeoutMs,
+            err: (err as Error)?.message ?? String(err),
+          },
+          "embed: request failed, retrying"
+        );
+        await sleep(delay);
+      }
+    }
+    throw embeddingFetchFailed(url, lastErr);
   }
 
   /**

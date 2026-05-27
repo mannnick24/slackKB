@@ -81,6 +81,13 @@ export interface AppConfig {
   llmConfig: LlmProvider;
 
   ingestEmbedBatchSize: number;
+  ingestEmbedConcurrency: number;
+  embeddingRequestTimeoutMs: number;
+  embeddingRetryCount: number;
+  embeddingRetryBackoffMs: number;
+
+  /** Max multipart file size for document upload (bytes). Env: MAX_UPLOAD_FILE_BYTES */
+  maxMultipartFileBytes: number;
 
   defaultAgentPrompt?: string;
 
@@ -169,6 +176,31 @@ export const config: AppConfig = {
   ingestEmbedBatchSize: (() => {
     const n = Math.floor(Number(process.env.INGEST_EMBED_BATCH_SIZE ?? "64"));
     return Number.isFinite(n) && n >= 1 ? n : 64;
+  })(),
+  ingestEmbedConcurrency: (() => {
+    const n = Math.floor(Number(process.env.INGEST_EMBED_CONCURRENCY ?? "4"));
+    return Number.isFinite(n) && n >= 1 ? n : 4;
+  })(),
+  embeddingRequestTimeoutMs: (() => {
+    const n = Math.floor(Number(process.env.EMBEDDING_REQUEST_TIMEOUT_MS ?? "120000"));
+    return Number.isFinite(n) && n >= 1_000 ? n : 120000;
+  })(),
+  embeddingRetryCount: (() => {
+    const n = Math.floor(Number(process.env.EMBEDDING_RETRY_COUNT ?? "2"));
+    return Number.isFinite(n) && n >= 0 ? n : 2;
+  })(),
+  embeddingRetryBackoffMs: (() => {
+    const n = Math.floor(Number(process.env.EMBEDDING_RETRY_BACKOFF_MS ?? "1000"));
+    return Number.isFinite(n) && n >= 0 ? n : 1000;
+  })(),
+
+  maxMultipartFileBytes: (() => {
+    const raw = process.env.MAX_UPLOAD_FILE_BYTES?.trim();
+    if (raw) {
+      const n = Math.floor(Number(raw));
+      if (Number.isFinite(n) && n >= 1_048_576) return n;
+    }
+    return 512 * 1024 * 1024;
   })(),
 
   llmConfig: {

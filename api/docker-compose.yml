@@ -1,6 +1,6 @@
 # Local defaults aligned with api/src/config.ts when env vars are unset:
 #   PG_CONNECTION_STRING=postgres://admin:supersecurepassword@localhost:5432/aic-db
-#   EMBEDDING_HOST=http://localhost:9012/embed   (maps skb-nomic-embed 8000 -> host 9012)
+#   EMBEDDING_HOST=http://localhost:9012/embed   (optional host-access via embed LB port mapping)
 #
 # App images (build from repo root): npm run image  →  slackkb-api:latest, slackkb-web:latest
 #
@@ -25,12 +25,11 @@ services:
       - pgdata:/var/lib/postgresql/data
       
       # Optional: run SQL scripts at startup (migrations, CREATE EXTENSION, etc.)
-      - ./init:/docker-entrypoint-initdb.d
+      - ./db:/docker-entrypoint-initdb.d
 
   skb-nomic-embed:
-    build: ./packages/nomic-embed
+    build: ./init/nomic-embed
     image: nomic-embed:latest
-    container_name: skb-nomic-embed
     # Make sure the app listens on 0.0.0.0:8000 in the container
     command: >
       sh -c 'python -c "import sys; print(sys.version)" &&
@@ -39,8 +38,10 @@ services:
       # Optional, but helps avoid tzdata/apt prompts if you build inside
       - PYTHONUNBUFFERED=1
       - PIP_NO_CACHE_DIR=1
-    ports:
-      - "9012:8000"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/docs"]
       interval: 10s
@@ -49,13 +50,26 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  skb-nomic-embed-lb:
+    image: nginx:1.27-alpine
+    container_name: skb-nomic-embed-lb
+    depends_on:
+      - skb-nomic-embed
+    volumes:
+      - ./init/nomic-embed/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    expose:
+      - "8000"
+    ports:
+      - "9012:8000"
+    restart: unless-stopped
+
   api:
     image: slackkb-api:latest
     container_name: skb-api
     restart: unless-stopped
     depends_on:
       - skb-postgres
-      - skb-nomic-embed
+      - skb-nomic-embed-lb
     # Lets LLM_BASE_URL use host.docker.internal (e.g. Ollama on the host) on Linux too
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -68,8 +82,8 @@ services:
       NODE_ENV: production
       PORT: "3001"
       PG_CONNECTION_STRING: postgres://admin:supersecurepassword@skb-postgres:5432/aic-db
-      # In-cluster embedding service (container port 8000, not host 9012)
-      EMBEDDING_HOST: http://skb-nomic-embed:8000/embed
+      # In-cluster embedding service behind nginx LB
+      EMBEDDING_HOST: http://skb-nomic-embed-lb:8000/embed
       # APP_ENC_KEY_B64, LLM_*, etc. come from the mounted .env; entries here override the file.
 
   web:

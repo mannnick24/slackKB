@@ -67,6 +67,8 @@ export type PublicAppConfig = {
   defaultAgentPrompt?: string;
   llmProviderType: string;
   embeddingProviderType: string;
+  /** Max upload size in bytes (multipart document ingest). */
+  maxMultipartFileBytes: number;
   logging: {
     level: string;
     pretty: boolean;

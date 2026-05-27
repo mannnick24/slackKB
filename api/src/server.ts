@@ -46,7 +46,7 @@ export async function buildServer() {
   });
 
   await app.register(sensible);
-  await app.register(multipart, { limits: { fileSize: 20 * 1024 * 1024 } });
+  await app.register(multipart, { limits: { fileSize: config.maxMultipartFileBytes } });
 
   await app.register(configRoutes, { prefix: "/api/v1" });
   await app.register(chatRoutes, { prefix: "/api/v1" });

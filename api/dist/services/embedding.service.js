@@ -88,6 +88,11 @@ function embeddingFetchFailed(url, err) {
     const cause = e?.cause != null ? ` cause=${String(e.cause)}` : "";
     return new Error(`Embedding HTTP request failed (${url}):${code} ${base}${cause}`);
 }
+function sleep(ms) {
+    if (ms <= 0)
+        return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 export class EmbeddingService {
     cryptoService;
     constructor(cryptoService) {
@@ -125,20 +130,14 @@ export class EmbeddingService {
         if (cfg.type === "OLLAMA") {
             const rawHost = cfg.host || process.env.OLLAMA_EMBEDDING_HOST || "http://localhost:11434/api/embed";
             const url = normalizeOllamaEmbedUrl(rawHost);
-            let resp;
-            try {
-                resp = await fetch(url, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        model: cfg.model,
-                        input: texts.length === 1 ? texts[0] : texts,
-                    }),
-                });
-            }
-            catch (err) {
-                throw embeddingFetchFailed(url, err);
-            }
+            const resp = await this.fetchWithRetry(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: cfg.model,
+                    input: texts.length === 1 ? texts[0] : texts,
+                }),
+            });
             const rawText = await resp.text();
             if (!resp.ok) {
                 throw new Error(`Ollama embedding request failed: ${resp.status} ${resp.statusText} ${rawText || "(empty body)"}`);
@@ -158,17 +157,11 @@ export class EmbeddingService {
                 process.env.DEFAULT_EMBEDDING_HOST ||
                 "http://localhost:9012/embed";
             const url = normalizeDefaultEmbedUrl(rawHost);
-            let resp;
-            try {
-                resp = await fetch(url, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ texts }),
-                });
-            }
-            catch (err) {
-                throw embeddingFetchFailed(url, err);
-            }
+            const resp = await this.fetchWithRetry(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ texts }),
+            });
             const rawText = await resp.text();
             if (!resp.ok) {
                 throw new Error(`DEFAULT embedding request failed: ${resp.status} ${resp.statusText} ${rawText || "(empty body)"}`);
@@ -190,6 +183,37 @@ export class EmbeddingService {
     async embedQuery(orgId, query) {
         const vectors = await this.embed(orgId, [query]);
         return vectors[0] ?? [];
+    }
+    async fetchWithRetry(url, init) {
+        const timeoutMs = config.embeddingRequestTimeoutMs;
+        const maxAttempts = Math.max(1, config.embeddingRetryCount + 1);
+        const baseBackoffMs = config.embeddingRetryBackoffMs;
+        let lastErr;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const response = await fetch(url, {
+                    ...init,
+                    signal: AbortSignal.timeout(timeoutMs),
+                });
+                return response;
+            }
+            catch (err) {
+                lastErr = err;
+                if (attempt >= maxAttempts)
+                    break;
+                const delay = baseBackoffMs * attempt;
+                logger.warn({
+                    url,
+                    attempt,
+                    maxAttempts,
+                    delayMs: delay,
+                    timeoutMs,
+                    err: err?.message ?? String(err),
+                }, "embed: request failed, retrying");
+                await sleep(delay);
+            }
+        }
+        throw embeddingFetchFailed(url, lastErr);
     }
     /**
      * Retrieve context for dynamic prompt enhancement (e.g. prepend to system prompt).

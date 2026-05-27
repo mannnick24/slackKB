@@ -371,11 +371,13 @@ export async function ingestSlackArchiveStreamedFromPath(
     }
 
     const batchSize = config.ingestEmbedBatchSize;
+    const embedConcurrency = config.ingestEmbedConcurrency;
     logger.debug(
         {
             orgId,
             filename,
             batchSize,
+            embedConcurrency,
             embeddingModel: embeddingConfig.model,
             embeddingDimensions: embeddingConfig.dimensions,
         },
@@ -383,6 +385,7 @@ export async function ingestSlackArchiveStreamedFromPath(
     );
 
     const pending: SlackPendingRow[] = [];
+    const inFlight = new Set<Promise<void>>();
 
     const insertRows = async (rows: SlackPendingRow[], embeddings: number[][]) => {
         const toInsert = rows
@@ -455,6 +458,16 @@ export async function ingestSlackArchiveStreamedFromPath(
         }
     };
 
+    const enqueueBatch = async (batch: SlackPendingRow[]) => {
+        const task = flushBatch(batch).finally(() => {
+            inFlight.delete(task);
+        });
+        inFlight.add(task);
+        if (inFlight.size >= embedConcurrency) {
+            await Promise.race(inFlight);
+        }
+    };
+
     const handleDoc = async (doc: ParsedDocument) => {
         filesProcessed += 1;
         onProgress?.({
@@ -481,7 +494,7 @@ export async function ingestSlackArchiveStreamedFromPath(
 
         while (pending.length >= batchSize) {
             const batch = pending.splice(0, batchSize);
-            await flushBatch(batch);
+            await enqueueBatch(batch);
         }
     };
 
@@ -494,8 +507,9 @@ export async function ingestSlackArchiveStreamedFromPath(
 
     if (pending.length > 0) {
         logger.debug({ remainder: pending.length }, "ingest: slack flushing final partial batch");
-        await flushBatch(pending.splice(0, pending.length));
+        await enqueueBatch(pending.splice(0, pending.length));
     }
+    await Promise.all(inFlight);
 
     logger.debug(
         {
