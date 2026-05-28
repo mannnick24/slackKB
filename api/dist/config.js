@@ -86,12 +86,18 @@ export const config = {
         charsPerToken: Number(process.env.CHARS_PER_TOKEN ?? "4"),
     },
     ingestEmbedBatchSize: (() => {
-        const n = Math.floor(Number(process.env.INGEST_EMBED_BATCH_SIZE ?? "64"));
-        return Number.isFinite(n) && n >= 1 ? n : 64;
+        const n = Math.floor(Number(process.env.INGEST_EMBED_BATCH_SIZE ?? "16"));
+        if (!Number.isFinite(n) || n < 1)
+            return 16;
+        return Math.min(n, 64);
     })(),
     ingestEmbedConcurrency: (() => {
-        const n = Math.floor(Number(process.env.INGEST_EMBED_CONCURRENCY ?? "4"));
-        return Number.isFinite(n) && n >= 1 ? n : 4;
+        const n = Math.floor(Number(process.env.INGEST_EMBED_CONCURRENCY ?? "2"));
+        return Number.isFinite(n) && n >= 1 ? Math.min(n, 8) : 2;
+    })(),
+    slackArchiveMaxJsonFiles: (() => {
+        const n = Math.floor(Number(process.env.SLACK_ARCHIVE_MAX_JSON_FILES ?? "0"));
+        return Number.isFinite(n) && n >= 0 ? n : 0;
     })(),
     embeddingRequestTimeoutMs: (() => {
         const n = Math.floor(Number(process.env.EMBEDDING_REQUEST_TIMEOUT_MS ?? "120000"));

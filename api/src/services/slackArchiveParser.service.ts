@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import unzipper from "unzipper";
+import { config } from "../config.js";
 import type { DocumentHandler, ParsedDocument } from "./documentParser.service.js";
 import { logger } from "../logger.js";
 
@@ -23,19 +24,31 @@ function detectSlackJsonShape(raw: string): SlackJsonShape {
 const SKIP_JSON_BASENAMES = new Set([
     "users.json",
     "channels.json",
+    "groups.json",
     "integration_logs.json",
     "emoji.json",
+    "accounts.json",
+    "canvases.json",
+    "file_conversations.json",
+    "lists.json",
+    "dnd.json",
+    "teams.json",
+    "faq.json",
 ]);
 
-const MAX_ZIP_SIZE_BYTES = 200 * 1024 * 1024;
-/** Slack exports can contain many daily JSON files across channels. */
-const MAX_JSON_ENTRIES = 8000;
+const MAX_ZIP_SIZE_BYTES = 512 * 1024 * 1024;
 
-function channelLabelFromPath(entryPath: string): string {
-    const parts = entryPath.split("/").filter(Boolean);
-    if (parts.length >= 2) return parts[parts.length - 2];
+/** Channel / DM folder name from a Slack export path (handles nested date folders). */
+export function channelLabelFromPath(entryPath: string): string {
+    const parts = entryPath.replace(/\\/g, "/").split("/").filter(Boolean);
+    if (parts.length === 0) return "slack";
     if (parts.length === 1) return path.basename(parts[0], ".json");
-    return "slack";
+    const dirs = parts.slice(0, -1);
+    let i = dirs.length - 1;
+    while (i >= 0 && (/^\d{4}$/.test(dirs[i]!) || /^\d{4}-\d{2}-\d{2}$/.test(dirs[i]!))) {
+        i--;
+    }
+    return i >= 0 ? dirs[i]! : dirs[0] ?? "slack";
 }
 
 /** Slack message ts is Unix seconds with fractional part as string. */
@@ -45,7 +58,29 @@ function slackTsToMessageAt(ts: string): Date | null {
     return new Date(n * 1000);
 }
 
-function formatMessageDoc(obj: Record<string, unknown>, entryPath: string): ParsedDocument | null {
+function readChannelNameMaps(raw: string): Map<string, string> {
+    const out = new Map<string, string>();
+    try {
+        const arr = JSON.parse(raw) as unknown;
+        if (!Array.isArray(arr)) return out;
+        for (const item of arr) {
+            if (!item || typeof item !== "object") continue;
+            const ch = item as Record<string, unknown>;
+            const id = typeof ch.id === "string" ? ch.id.trim() : "";
+            const name = typeof ch.name === "string" ? ch.name.trim() : "";
+            if (id && name) out.set(id, name);
+        }
+    } catch {
+        /* ignore malformed metadata */
+    }
+    return out;
+}
+
+function formatMessageDoc(
+    obj: Record<string, unknown>,
+    entryPath: string,
+    channelNamesById: Map<string, string>
+): ParsedDocument | null {
     const text = typeof obj.text === "string" ? obj.text : "";
     const trimmed = text.trim();
     if (!trimmed) return null;
@@ -61,7 +96,8 @@ function formatMessageDoc(obj: Record<string, unknown>, entryPath: string): Pars
     const userIdRaw = typeof obj.user === "string" ? obj.user.trim() : "";
     const userId = userIdRaw.length > 0 ? userIdRaw : null;
 
-    const channel = channelLabelFromPath(entryPath);
+    const pathLabel = channelLabelFromPath(entryPath);
+    const channel = channelNamesById.get(pathLabel) ?? pathLabel;
     const body = [
         `Channel: ${channel}`,
         `Timestamp: ${ts}`,
@@ -95,6 +131,7 @@ function formatMessageDoc(obj: Record<string, unknown>, entryPath: string): Pars
 function extractMessagesFromJsonContent(
     raw: string,
     entryPath: string,
+    channelNamesById: Map<string, string>,
     stats?: { nonMessageObjects: number; emptyTextSkipped: number }
 ): ParsedDocument[] {
     const trimmed = raw.trim();
@@ -108,7 +145,7 @@ function extractMessagesFromJsonContent(
             if (stats) stats.nonMessageObjects += 1;
             return;
         }
-        const doc = formatMessageDoc(o, entryPath);
+        const doc = formatMessageDoc(o, entryPath, channelNamesById);
         if (doc) out.push(doc);
         else if (stats) stats.emptyTextSkipped += 1;
     };
@@ -152,7 +189,9 @@ function shouldParseSlackJsonEntry(entryPath: string): boolean {
     if (!lower.endsWith(".json")) return false;
     const base = path.basename(lower);
     if (SKIP_JSON_BASENAMES.has(base)) return false;
-    return true;
+    // Message logs live under channel/DM folders, not at the zip root.
+    const parts = entryPath.replace(/\\/g, "/").split("/").filter(Boolean);
+    return parts.length >= 2;
 }
 
 /**
@@ -171,6 +210,7 @@ export async function parseSlackArchiveZipStreaming(
     const directory = await unzipper.Open.file(filePath);
     const allEntries = directory.files.filter((e) => e.type !== "Directory");
     const candidateJson = allEntries.filter((e) => shouldParseSlackJsonEntry(e.path));
+    const maxJsonFiles = config.slackArchiveMaxJsonFiles;
 
     logger.debug(
         {
@@ -179,11 +219,15 @@ export async function parseSlackArchiveZipStreaming(
             zipSizeBytes: stat.size,
             zipEntryCount: allEntries.length,
             slackJsonCandidateCount: candidateJson.length,
+            maxJsonFiles: maxJsonFiles > 0 ? maxJsonFiles : "unlimited",
         },
         "slack parser: opened archive"
     );
 
+    const channelNamesById = new Map<string, string>();
     let jsonFilesProcessed = 0;
+    let jsonFilesSkippedOverLimit = 0;
+    let entriesSkippedNonMessageJson = 0;
     let messagesEmitted = 0;
     let entriesSkippedNotJson = 0;
     let entriesSkippedMetadata = 0;
@@ -201,13 +245,39 @@ export async function parseSlackArchiveZipStreaming(
             continue;
         }
         const base = path.basename(lower);
+
+        if (base === "channels.json" || base === "groups.json") {
+            entriesSkippedMetadata += 1;
+            const stream = entry.stream();
+            const chunks: Buffer[] = [];
+            await new Promise<void>((resolve, reject) => {
+                stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+                stream.on("end", () => resolve());
+                stream.on("error", reject);
+            });
+            const raw = Buffer.concat(chunks).toString("utf-8");
+            for (const [id, label] of readChannelNameMaps(raw)) {
+                channelNamesById.set(id, label);
+            }
+            logger.debug(
+                { entryPath: name, channelMapSize: channelNamesById.size },
+                "slack parser: loaded channel metadata"
+            );
+            continue;
+        }
+
         if (SKIP_JSON_BASENAMES.has(base)) {
             entriesSkippedMetadata += 1;
             logger.debug({ entryPath: name, reason: "metadata_json" }, "slack parser: skip file");
             continue;
         }
-        if (jsonFilesProcessed >= MAX_JSON_ENTRIES) {
-            throw new Error("Slack archive contains too many JSON files to ingest");
+        if (!shouldParseSlackJsonEntry(name)) {
+            entriesSkippedNonMessageJson += 1;
+            continue;
+        }
+        if (maxJsonFiles > 0 && jsonFilesProcessed >= maxJsonFiles) {
+            jsonFilesSkippedOverLimit += 1;
+            continue;
         }
 
         const stream = entry.stream();
@@ -220,7 +290,7 @@ export async function parseSlackArchiveZipStreaming(
         const raw = Buffer.concat(chunks).toString("utf-8");
         const shape = detectSlackJsonShape(raw);
         const lineStats = { nonMessageObjects: 0, emptyTextSkipped: 0 };
-        const docs = extractMessagesFromJsonContent(raw, name, lineStats);
+        const docs = extractMessagesFromJsonContent(raw, name, channelNamesById, lineStats);
         nonMessageObjects += lineStats.nonMessageObjects;
         emptyTextMessagesSkipped += lineStats.emptyTextSkipped;
         if (raw.trim().length > 0 && docs.length === 0) {
@@ -251,6 +321,21 @@ export async function parseSlackArchiveZipStreaming(
         jsonFilesProcessed += 1;
     }
 
+    if (jsonFilesSkippedOverLimit > 0) {
+        const msg = `Slack archive exceeded JSON file limit (${maxJsonFiles}): skipped ${jsonFilesSkippedOverLimit} message file(s); re-ingest with SLACK_ARCHIVE_MAX_JSON_FILES=0 or a higher limit`;
+        logger.warn(
+            {
+                archiveFilename,
+                maxJsonFiles,
+                jsonFilesProcessed,
+                jsonFilesSkippedOverLimit,
+                slackJsonCandidateCount: candidateJson.length,
+            },
+            "slack parser: archive truncated by file limit"
+        );
+        throw new Error(msg);
+    }
+
     logger.debug(
         {
             archiveFilename,
@@ -258,6 +343,8 @@ export async function parseSlackArchiveZipStreaming(
             messagesEmitted,
             entriesSkippedNotJson,
             entriesSkippedMetadata,
+            entriesSkippedNonMessageJson,
+            channelMapSize: channelNamesById.size,
             jsonFilesMalformed,
             jsonFilesWithNoMessages,
             nonMessageObjects,

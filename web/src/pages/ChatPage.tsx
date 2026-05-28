@@ -1,7 +1,13 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
 import type { ChatCompletionMessage, RagFiltersPayload } from "../api/types";
 import { Layout } from "../components/Layout";
+import { MultiSelectSearch } from "../components/MultiSelectSearch";
+import {
+  datetimeLocalFromPreset,
+  TIME_PRESETS,
+  type TimePresetId,
+} from "../components/ragTimePresets";
 
 function parseApiErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
@@ -34,6 +40,37 @@ function buildRagFilters(
   if (selectedChannels.length) out.channels = [...selectedChannels];
   if (selectedUserIds.length) out.userIds = [...selectedUserIds];
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function TimePresetButtons({
+  onSelect,
+  disabled,
+}: {
+  onSelect: (preset: TimePresetId) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+      {TIME_PRESETS.map((p) => (
+        <button
+          key={p.id}
+          type="button"
+          disabled={disabled}
+          onClick={() => onSelect(p.id)}
+          style={{
+            padding: "2px 8px",
+            fontSize: 11,
+            border: "1px solid #ccc",
+            borderRadius: 4,
+            background: "#f9fafb",
+            cursor: disabled ? "not-allowed" : "pointer",
+          }}
+        >
+          {p.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 export function ChatPage() {
@@ -115,6 +152,15 @@ export function ChatPage() {
     buildRagFilters(timeFromLocal, timeToLocal, selectedChannels, selectedUserIds)
   );
 
+  const channelOptions = useMemo(
+    () => channels.map((c) => ({ value: c, label: c })),
+    [channels]
+  );
+  const userOptions = useMemo(
+    () => users.map((u) => ({ value: u.id, label: u.label })),
+    [users]
+  );
+
   return (
     <Layout title="Chat">
       <div
@@ -140,9 +186,9 @@ export function ChatPage() {
             fontSize: 13,
           }}
         >
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 16 }}>
             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              From (local)
+              <span style={{ fontSize: 13 }}>From (local)</span>
               <input
                 type="datetime-local"
                 value={timeFromLocal}
@@ -150,9 +196,13 @@ export function ChatPage() {
                 disabled={filtersLoading}
                 style={{ fontSize: 13 }}
               />
+              <TimePresetButtons
+                disabled={filtersLoading}
+                onSelect={(preset) => setTimeFromLocal(datetimeLocalFromPreset(preset))}
+              />
             </label>
             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              To (exclusive, local)
+              <span style={{ fontSize: 13 }}>To (exclusive, local)</span>
               <input
                 type="datetime-local"
                 value={timeToLocal}
@@ -160,59 +210,41 @@ export function ChatPage() {
                 disabled={filtersLoading}
                 style={{ fontSize: 13 }}
               />
+              <TimePresetButtons
+                disabled={filtersLoading}
+                onSelect={(preset) => setTimeToLocal(datetimeLocalFromPreset(preset))}
+              />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 140 }}>
-              Channels
-              <select
-                multiple
-                size={Math.min(6, Math.max(3, channels.length || 1))}
-                value={selectedChannels}
-                onChange={(e) => {
-                  const opts = Array.from(e.target.selectedOptions).map((o) => o.value);
-                  setSelectedChannels(opts);
-                }}
-                disabled={filtersLoading || channels.length === 0}
-                style={{ fontSize: 13 }}
-              >
-                {channels.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 160 }}>
-              Users
-              <select
-                multiple
-                size={Math.min(6, Math.max(3, users.length || 1))}
-                value={selectedUserIds}
-                onChange={(e) => {
-                  const opts = Array.from(e.target.selectedOptions).map((o) => o.value);
-                  setSelectedUserIds(opts);
-                }}
-                disabled={filtersLoading || users.length === 0}
-                style={{ fontSize: 13 }}
-              >
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <MultiSelectSearch
+              label="Channels"
+              placeholder="Search channels…"
+              options={channelOptions}
+              value={selectedChannels}
+              onChange={setSelectedChannels}
+              disabled={filtersLoading || channels.length === 0}
+              minWidth={180}
+            />
+            <MultiSelectSearch
+              label="Users"
+              placeholder="Search users…"
+              options={userOptions}
+              value={selectedUserIds}
+              onChange={setSelectedUserIds}
+              disabled={filtersLoading || users.length === 0}
+              minWidth={200}
+            />
             <button
               type="button"
               onClick={clearRagFilters}
               disabled={!hasActiveFilters || pending}
-              style={{ padding: "8px 12px", fontSize: 13, alignSelf: "center" }}
+              style={{ padding: "8px 12px", fontSize: 13, marginTop: 22 }}
             >
               Clear filters
             </button>
           </div>
           <p style={{ margin: "8px 0 0", fontSize: 11, opacity: 0.75 }}>
-            Hold Ctrl/Cmd to select multiple channels or users. “To” is exclusive (messages strictly before
-            that instant).
+            Quick presets set each bound relative to now; “All” clears that bound. “To” is exclusive
+            (messages strictly before that instant).
           </p>
           {filterLoadError && (
             <p style={{ margin: "6px 0 0", fontSize: 12, color: "crimson" }}>{filterLoadError}</p>

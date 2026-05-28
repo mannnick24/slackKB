@@ -1,6 +1,7 @@
 # Local defaults aligned with api/src/config.ts when env vars are unset:
 #   PG_CONNECTION_STRING=postgres://admin:supersecurepassword@localhost:5432/aic-db
 #   EMBEDDING_HOST=http://localhost:9012/embed   (optional host-access via embed LB port mapping)
+#   INGEST_EMBED_BATCH_SIZE=16, INGEST_EMBED_CONCURRENCY=2 (api service overrides in compose)
 #
 # App images (build from repo root): npm run image  →  slackkb-api:latest, slackkb-web:latest
 #
@@ -77,11 +78,16 @@ services:
       # Default: api/.env when `docker compose` is run from the api/ directory
       - ./.env:/app/.env:ro
     environment:
-      NODE_ENV: development
+      # Production image omits devDependencies (pino-pretty). Keep NODE_ENV=production or LOG_PRETTY=false.
+      LOG_PRETTY: "false"
       PORT: "3001"
       PG_CONNECTION_STRING: postgres://admin:supersecurepassword@skb-postgres:5432/aic-db
       # In-cluster embedding service behind nginx LB
       EMBEDDING_HOST: http://skb-nomic-embed-lb:8000/embed
+      # Smaller batches reduce 502/timeouts against a single nomic-embed instance
+      INGEST_EMBED_BATCH_SIZE: "16"
+      INGEST_EMBED_CONCURRENCY: "2"
+      EMBEDDING_REQUEST_TIMEOUT_MS: "300000"
       # APP_ENC_KEY_B64, LLM_*, etc. come from the mounted .env; entries here override the file.
 
   web:

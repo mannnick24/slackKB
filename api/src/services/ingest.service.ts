@@ -440,16 +440,30 @@ export async function ingestSlackArchiveStreamedFromPath(
         );
     };
 
+    /** Embed texts; on failure split the batch in half until size 1, then rethrow. */
+    const embedTextsWithSplit = async (texts: string[]): Promise<number[][]> => {
+        try {
+            return await embeddingService.embed(orgId, texts);
+        } catch (err) {
+            if (texts.length <= 1) throw err;
+            const mid = Math.ceil(texts.length / 2);
+            logger.debug(
+                { count: texts.length, left: mid, right: texts.length - mid },
+                "ingest: slack embed batch split after failure"
+            );
+            const left = await embedTextsWithSplit(texts.slice(0, mid));
+            const right = await embedTextsWithSplit(texts.slice(mid));
+            return [...left, ...right];
+        }
+    };
+
     /** Embed a batch; on failure fall back to single-message calls so partial progress still lands. */
     const flushBatch = async (batch: SlackPendingRow[]) => {
         if (batch.length === 0) return;
         logger.debug({ batchSize: batch.length, pendingAfter: pending.length }, "ingest: slack embed batch start");
         let embeddings: number[][];
         try {
-            embeddings = await embeddingService.embed(
-                orgId,
-                batch.map((b) => b.text)
-            );
+            embeddings = await embedTextsWithSplit(batch.map((b) => b.text));
         } catch (batchErr: any) {
             logger.debug(
                 { batchSize: batch.length, err: batchErr?.message ?? String(batchErr) },
