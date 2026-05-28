@@ -187,6 +187,10 @@ export async function parseSlackArchiveZipStreaming(
     let messagesEmitted = 0;
     let entriesSkippedNotJson = 0;
     let entriesSkippedMetadata = 0;
+    let jsonFilesMalformed = 0;
+    let jsonFilesWithNoMessages = 0;
+    let nonMessageObjects = 0;
+    let emptyTextMessagesSkipped = 0;
 
     for (const entry of directory.files) {
         if (entry.type === "Directory") continue;
@@ -217,6 +221,16 @@ export async function parseSlackArchiveZipStreaming(
         const shape = detectSlackJsonShape(raw);
         const lineStats = { nonMessageObjects: 0, emptyTextSkipped: 0 };
         const docs = extractMessagesFromJsonContent(raw, name, lineStats);
+        nonMessageObjects += lineStats.nonMessageObjects;
+        emptyTextMessagesSkipped += lineStats.emptyTextSkipped;
+        if (raw.trim().length > 0 && docs.length === 0) {
+            if (lineStats.nonMessageObjects === 0 && lineStats.emptyTextSkipped === 0) {
+                jsonFilesMalformed += 1;
+                logger.warn({ entryPath: name, jsonShape: shape, rawChars: raw.length }, "slack parser: malformed/unsupported JSON log file");
+            } else {
+                jsonFilesWithNoMessages += 1;
+            }
+        }
 
         logger.debug(
             {
@@ -244,6 +258,10 @@ export async function parseSlackArchiveZipStreaming(
             messagesEmitted,
             entriesSkippedNotJson,
             entriesSkippedMetadata,
+            jsonFilesMalformed,
+            jsonFilesWithNoMessages,
+            nonMessageObjects,
+            emptyTextMessagesSkipped,
         },
         "slack parser: archive walk complete"
     );

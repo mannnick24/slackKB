@@ -59,8 +59,6 @@ services:
       - ./init/nomic-embed/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     expose:
       - "8000"
-    ports:
-      - "9012:8000"
     restart: unless-stopped
 
   api:
@@ -79,7 +77,7 @@ services:
       # Default: api/.env when `docker compose` is run from the api/ directory
       - ./.env:/app/.env:ro
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
       PORT: "3001"
       PG_CONNECTION_STRING: postgres://admin:supersecurepassword@skb-postgres:5432/aic-db
       # In-cluster embedding service behind nginx LB

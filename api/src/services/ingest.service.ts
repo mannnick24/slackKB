@@ -341,6 +341,18 @@ type SlackPendingRow = {
     slackUserLabel: string | null;
 };
 
+function bumpCounter(map: Map<string, number>, key: string | null | undefined, by: number = 1): void {
+    const k = key && key.trim() ? key.trim() : "unknown";
+    map.set(k, (map.get(k) ?? 0) + by);
+}
+
+function summarizeCounter(map: Map<string, number>, limit: number = 25): Array<{ key: string; count: number }> {
+    return [...map.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, limit)
+        .map(([key, count]) => ({ key, count }));
+}
+
 /**
  * Slack export zip: one vector per message object (no chunking). Streams JSON files from the archive.
  * Embeddings are requested in batches (see config.ingestEmbedBatchSize).
@@ -386,6 +398,11 @@ export async function ingestSlackArchiveStreamedFromPath(
 
     const pending: SlackPendingRow[] = [];
     const inFlight = new Set<Promise<void>>();
+    const seenByChannel = new Map<string, number>();
+    const queuedByChannel = new Map<string, number>();
+    const insertAttemptByChannel = new Map<string, number>();
+    const embedFailureByChannel = new Map<string, number>();
+    const insertFailureByChannel = new Map<string, number>();
 
     const insertRows = async (rows: SlackPendingRow[], embeddings: number[][]) => {
         const toInsert = rows
@@ -403,6 +420,7 @@ export async function ingestSlackArchiveStreamedFromPath(
             }))
             .filter((row) => row.embedding.length > 0);
         if (toInsert.length === 0) return;
+        for (const row of toInsert) bumpCounter(insertAttemptByChannel, row.slackChannel);
         const ins = await vectorRepo.insertChunks(orgId, toInsert);
         chunksStored += ins.inserted;
         skippedDuplicates += ins.skippedDuplicates;
@@ -426,33 +444,64 @@ export async function ingestSlackArchiveStreamedFromPath(
     const flushBatch = async (batch: SlackPendingRow[]) => {
         if (batch.length === 0) return;
         logger.debug({ batchSize: batch.length, pendingAfter: pending.length }, "ingest: slack embed batch start");
+        let embeddings: number[][];
         try {
-            const embeddings = await embeddingService.embed(
+            embeddings = await embeddingService.embed(
                 orgId,
                 batch.map((b) => b.text)
             );
-            if (embeddings.length !== batch.length) {
-                throw new Error(
-                    `Embedding count mismatch: got ${embeddings.length}, expected ${batch.length}`
-                );
-            }
-            await insertRows(batch, embeddings);
         } catch (batchErr: any) {
             logger.debug(
                 { batchSize: batch.length, err: batchErr?.message ?? String(batchErr) },
                 "ingest: slack batch embed failed, falling back to single-message embeds"
             );
             errors.push(`Batch embed (${batch.length}): ${batchErr?.message ?? String(batchErr)}`);
+            for (const row of batch) bumpCounter(embedFailureByChannel, row.slackChannel);
             for (const row of batch) {
                 try {
-                    const embeddings = await embeddingService.embed(orgId, [row.text]);
-                    await insertRows([row], embeddings);
+                    const rowEmbeddings = await embeddingService.embed(orgId, [row.text]);
+                    try {
+                        await insertRows([row], rowEmbeddings);
+                    } catch (insertErr: any) {
+                        bumpCounter(insertFailureByChannel, row.slackChannel);
+                        errors.push(insertErr?.message ?? String(insertErr));
+                    }
                 } catch (e: any) {
                     logger.debug(
                         { ingestKey: row.ingestKey, err: e?.message ?? String(e) },
                         "ingest: slack single-message embed failed"
                     );
+                    bumpCounter(embedFailureByChannel, row.slackChannel);
                     errors.push(e?.message ?? String(e));
+                }
+            }
+            return;
+        }
+
+        if (embeddings.length !== batch.length) {
+            const err = `Embedding count mismatch: got ${embeddings.length}, expected ${batch.length}`;
+            errors.push(err);
+            logger.warn({ batchSize: batch.length, err }, "ingest: slack batch embed mismatch");
+            for (const row of batch) bumpCounter(embedFailureByChannel, row.slackChannel);
+            return;
+        }
+
+        try {
+            await insertRows(batch, embeddings);
+        } catch (insertErr: any) {
+            logger.warn(
+                { batchSize: batch.length, err: insertErr?.message ?? String(insertErr) },
+                "ingest: slack batch insert failed, falling back to per-message insert"
+            );
+            errors.push(`Batch insert (${batch.length}): ${insertErr?.message ?? String(insertErr)}`);
+            for (const row of batch) bumpCounter(insertFailureByChannel, row.slackChannel);
+            for (let i = 0; i < batch.length; i++) {
+                const row = batch[i]!;
+                try {
+                    await insertRows([row], [embeddings[i] ?? []]);
+                } catch (singleInsertErr: any) {
+                    bumpCounter(insertFailureByChannel, row.slackChannel);
+                    errors.push(singleInsertErr?.message ?? String(singleInsertErr));
                 }
             }
         }
@@ -482,6 +531,8 @@ export async function ingestSlackArchiveStreamedFromPath(
             return;
         }
         const sm = doc.slack;
+        const channel = sm?.channel ?? "unknown";
+        bumpCounter(seenByChannel, channel);
         pending.push({
             text: trimmed,
             sourceName: doc.name,
@@ -491,6 +542,23 @@ export async function ingestSlackArchiveStreamedFromPath(
             slackUserId: sm?.userId ?? null,
             slackUserLabel: sm?.userLabel ?? null,
         });
+        bumpCounter(queuedByChannel, channel);
+
+        if (filesProcessed % 5000 === 0) {
+            logger.info(
+                {
+                    orgId,
+                    filename,
+                    messagesSeen: filesProcessed,
+                    pendingCount: pending.length,
+                    inFlightBatches: inFlight.size,
+                    chunksStored,
+                    topSeenChannels: summarizeCounter(seenByChannel, 10),
+                    topQueuedChannels: summarizeCounter(queuedByChannel, 10),
+                },
+                "ingest: slack progress checkpoint"
+            );
+        }
 
         while (pending.length >= batchSize) {
             const batch = pending.splice(0, batchSize);
@@ -511,7 +579,15 @@ export async function ingestSlackArchiveStreamedFromPath(
     }
     await Promise.all(inFlight);
 
-    logger.debug(
+    const channelsSeen = new Set(seenByChannel.keys());
+    const channelsQueued = new Set(queuedByChannel.keys());
+    const channelsWithInsertAttempts = new Set(insertAttemptByChannel.keys());
+    const channelsWithEmbedFailures = new Set(embedFailureByChannel.keys());
+    const channelsWithInsertFailures = new Set(insertFailureByChannel.keys());
+    const channelsSeenButNeverQueued = [...channelsSeen].filter((c) => !channelsQueued.has(c));
+    const channelsQueuedButNoInsertAttempt = [...channelsQueued].filter((c) => !channelsWithInsertAttempts.has(c));
+
+    logger.info(
         {
             orgId,
             filename,
@@ -519,6 +595,18 @@ export async function ingestSlackArchiveStreamedFromPath(
             chunksStored,
             skippedDuplicates,
             errorCount: errors.length,
+            uniqueChannelsSeen: channelsSeen.size,
+            uniqueChannelsQueued: channelsQueued.size,
+            uniqueChannelsWithInsertAttempts: channelsWithInsertAttempts.size,
+            channelsWithEmbedFailures: [...channelsWithEmbedFailures],
+            channelsWithInsertFailures: [...channelsWithInsertFailures],
+            channelsSeenButNeverQueued,
+            channelsQueuedButNoInsertAttempt,
+            topChannelsSeen: summarizeCounter(seenByChannel),
+            topChannelsQueued: summarizeCounter(queuedByChannel),
+            topChannelsInsertAttempted: summarizeCounter(insertAttemptByChannel),
+            topChannelsEmbedFailures: summarizeCounter(embedFailureByChannel),
+            topChannelsInsertFailures: summarizeCounter(insertFailureByChannel),
         },
         "ingest: slack archive finished"
     );
